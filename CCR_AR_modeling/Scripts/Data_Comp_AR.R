@@ -3,6 +3,7 @@
 
 ##packages
 library(tidyverse)
+library(slider) # for rolling windows 'slide_dbl'
 
 
 #### EDI data sets ----
@@ -65,7 +66,11 @@ AR_df_lag <- AR_df |>
   mutate(fDOM_1m_lag1 = lag(fDOM_1_QSU_daily , 1),
          fDOM_9m_lag1 = lag(fDOM_9_QSU_daily , 1),
          Rain_mm_lag1 = lag(Rain_mm_daily, 1),
-         Rain_mm_lag2 = lag(Rain_mm_daily, 2))
+         Rain_mm_lag2 = lag(Rain_mm_daily, 2)) |>
+  mutate(
+    Rain_mm_10day    = slider::slide_dbl(Rain_mm_daily,    sum,  .before = 10, .after = 0, .complete = TRUE),
+    Chla_1_ugL_10day = slider::slide_dbl(Chla_1_ugL_daily, mean, .before = 10, .after = 0, .complete = F)
+  )
 
 AR_df_lag_ZS <- AR_df_lag |>
   mutate(across(
