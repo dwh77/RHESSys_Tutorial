@@ -13,6 +13,31 @@ df <- roa |>
          TMAX = ((TMAX-32) * (5/9))
   )
 
+##Look at roa climate data over time
+df |> pivot_longer(-1) |>
+  ggplot(aes(x = as.Date(DATE), y = value))+
+  geom_point()+ facet_wrap(~name, scales = "free_y")
+
+yearly <- df |>
+  mutate(date = as.Date(DATE),
+         year = year(date)) |>
+  # mutate(wet = PRCP > 0) |>
+  filter(date < ymd("2025-01-01")) |>
+  group_by(year) |>
+  summarise(Tmax_mean = mean(TMAX, na.rm = T),
+            Tmin_mean = mean(TMAX, na.rm = T),
+            Rain_sum = sum(PRCP, na.rm = T),
+            Rain_days = sum(PRCP > 0, na.rm = T))
+
+
+yearly |> pivot_longer(-1) |>
+  ggplot(aes(x = year, y = value))+
+  geom_point()+ geom_smooth() + facet_wrap(~name, scales = "free_y")
+
+
+
+
+
 
 #Function to structure to climate data in RHESSys format
 #Note: the 1 is a place holder for hour but data is daily sequence. see 'Format for Time Series Input Files' from 'Climate-Inputs' link below
