@@ -27,6 +27,12 @@ ar_df |>
   #plot acutaly data
   geom_point() + theme_bw() + theme(legend.position = "top")
 
+#storm plot
+ar_df |>
+
+  ggplot(aes(x = Date, y = Rain_mm_daily))+
+  geom_point()
+
 
 
 
@@ -45,7 +51,7 @@ ar_df |>
 #### Set up data ----
 fdom9m <- ar_df %>%
   dplyr::select(Date, fDOM_9_QSU_daily, fDOM_9m_lag1_ZS, Chla_1_ugL_daily_ZS, DOsat_9_pct_daily_ZS ,
-         Temp_9_C_daily_ZS,
+         Temp_9_C_daily_ZS, Chla_1_ugL_10day_ZS,
          Rain_mm_daily_ZS, Rain_mm_lag1_ZS, Rain_mm_lag2_ZS, SW_Wm2_daily_ZS) %>%
   mutate(Date = as.Date(Date))
   # filter(Date < ymd("2025-01-01"))
@@ -56,10 +62,11 @@ head(fdom9m)
 
 #### Build global model and dredge ----
 # build a global model with the selected variables and then use dredge to see which combinations have the lowest AICc values
-model_fdom9m <- glm(fDOM_9_QSU_daily ~ fDOM_9m_lag1_ZS + Chla_1_ugL_daily_ZS + DOsat_9_pct_daily_ZS +
-                      Temp_9_C_daily_ZS +
-                      SW_Wm2_daily_ZS +
-                      Rain_mm_daily_ZS + Rain_mm_lag1_ZS + Rain_mm_lag2_ZS ,
+model_fdom9m <- glm(fDOM_9_QSU_daily ~ fDOM_9m_lag1_ZS  +
+                      DOsat_9_pct_daily_ZS + Temp_9_C_daily_ZS +
+                      Chla_1_ugL_daily_ZS + Chla_1_ugL_10day_ZS +
+                      SW_Wm2_daily_ZS, # +
+                      # Rain_mm_daily_ZS + Rain_mm_lag1_ZS + Rain_mm_lag2_ZS ,
                     data = fdom9m, family = gaussian, na.action = na.fail)
 
 
@@ -72,6 +79,11 @@ glm_fdom9m <- dredge(model_fdom9m, rank = "AICc", fixed = "fDOM_9m_lag1_ZS") #sc
 mod1_fdom9m <- glm(fDOM_9_QSU_daily ~ fDOM_9m_lag1_ZS + DOsat_9_pct_daily_ZS +
                                    Temp_9_C_daily_ZS + Rain_mm_lag2_ZS,
                                  data = fdom9m, family = gaussian, na.action = na.fail)
+
+#Top with no Rain variables
+mod1_fdom9m <- glm(fDOM_9_QSU_daily ~ fDOM_9m_lag1_ZS +
+                     DOsat_9_pct_daily_ZS + Temp_9_C_daily_ZS ,
+                   data = fdom9m, family = gaussian, na.action = na.fail)
 
 #predict
 pred1_fdom9 <- predict(mod1_fdom9m, newdata = fdom9m)
@@ -96,7 +108,7 @@ round(Metrics::rmse(pred1_fdom9, fdom9m$fDOM_9_QSU_daily), digits = 1)
 #### Set up data ----
 fdom1m <- ar_df %>%
   dplyr::select(Date, fDOM_1_QSU_daily, fDOM_1m_lag1_ZS, Chla_1_ugL_daily_ZS, DOsat_1_pct_daily_ZS ,
-                Temp_1_C_daily_ZS,
+                Temp_1_C_daily_ZS, Chla_1_ugL_10day_ZS,
                 Rain_mm_daily_ZS, Rain_mm_lag1_ZS, Rain_mm_lag2_ZS, SW_Wm2_daily_ZS) %>%
   mutate(Date = as.Date(Date))
 
@@ -105,10 +117,11 @@ head(fdom1m)
 
 
 # build a global model with the selected variables and then use dredge to see which combinations have the lowest AICc values
-model_fdom1m <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1_ZS + Chla_1_ugL_daily_ZS + DOsat_1_pct_daily_ZS +
-                      Temp_1_C_daily_ZS +
-                      SW_Wm2_daily_ZS +
-                      Rain_mm_daily_ZS + Rain_mm_lag1_ZS + Rain_mm_lag2_ZS,
+model_fdom1m <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1_ZS  +
+                      DOsat_1_pct_daily_ZS +  Temp_1_C_daily_ZS +
+                      Chla_1_ugL_daily_ZS + Chla_1_ugL_10day_ZS +
+                      SW_Wm2_daily_ZS, # +
+                      #Rain_mm_daily_ZS + Rain_mm_lag1_ZS + Rain_mm_lag2_ZS,
                     data = fdom1m, family = gaussian, na.action = na.fail)
 
 
