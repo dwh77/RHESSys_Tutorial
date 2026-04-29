@@ -13,7 +13,7 @@ library(tidyverse)
 ## Get daily Q from HPB PT
 
 ```{r}
-hpb_stage_STAGED <- read_csv("https://pasta-s.lternet.edu/package/data/eml/edi/1781/1/630f42ffb3560c3a6afd592511756c1e")
+hpb_stage_STAGED <- read_csv("https://pasta-s.lternet.edu/package/data/eml/edi/1781/12/630f42ffb3560c3a6afd592511756c1e")
 
 daily_Q <- hpb_stage_STAGED |> 
   mutate(Date = as.Date(DateTime)) |> 
@@ -64,7 +64,8 @@ hpb_chem <- chem_EDI |>
   pivot_longer(-1) |> 
   mutate(value = round(value, 3)) |> 
   pivot_wider(names_from = name, values_from = value) |> 
-  select(Date, DOC_mgL, DON_mgL, NO3_mgL, NH4_mgL, DN_mgL, TN_mgL)
+  select(Date, DOC_mgL, DON_mgL, NO3_mgL, NH4_mgL)
+  #select(Date, DOC_mgL, DON_mgL, NO3_mgL, NH4_mgL, DN_mgL, TN_mgL)
 
 
 
@@ -129,10 +130,11 @@ lai <- read_csv("./LAI_modisData_nov2002_jan2026.csv") |>
 df_join <- full_join(daily_Q, hpb_flowmate, by = "Date") |> 
   full_join(lai, by = "Date") |> 
   full_join(hpb_chem, by = "Date") |> 
-  arrange(Date)
+  arrange(Date) |> 
+  filter(Date >= ymd("2020-01-01"))
 
 
-write.csv(df_join, "./TargetData_15mar26.csv", row.names = F)
+write.csv(df_join, "./TargetData_2020_2025.csv", row.names = F)
 
 
 ```
