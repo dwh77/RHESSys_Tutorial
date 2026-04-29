@@ -29,48 +29,66 @@ target_df <- read_csv("../Target_Data_comp/TargetData_15mar26.csv") |>
 #Spin and test
 
 ```{r}
-devpath <- "C:/Users/dwh18/OneDrive/Desktop/R_Projects/RHESSys_development/RHESSys_Tutorial/HPB_files_NewMaps/"
+devpath <- "C:/Users/dwh18/OneDrive/Desktop/R_Projects/RHESSys_development/ccr_rhessys/"
 ```
 
 
 ```{r}
 ##spin
+read_plot_rhessys(outname = paste0(devpath, "out/apr19RouteTest/650spin/hpb_650spin_1"), 
+                  date_filter = as.Date("1970-01-01"), ncol = 5, validate = F)
 
-# read_plot_rhessys(outname = paste0(devpath, "out/apr13RouteTest/COWTest1/hpb_spin_1cow"), 
-#                   date_filter = as.Date("1960-01-01"), ncol = 5, validate = F)
 
-
-read_plot_rhessys(outname = paste0(devpath, "out/apr13RouteTest/COWTest3/hpb_spin_4cow"), 
-                  date_filter = as.Date("1960-01-01"), ncol = 5, validate = F)
+read_plot_rhessys(outname = paste0(devpath, "out/apr19RouteTest/650spin/hpb_650spin_1"), 
+                  date_filter = as.Date("2595-01-01"), ncol = 5, validate = F)
 
 
 ## validate
-read_plot_rhessys(outname = paste0(devpath, "out/apr13RouteTest/COWTest3/hpb_test_4cow"), ncol = 5, validate = T)
+read_plot_rhessys(outname = paste0(devpath, "out/apr19RouteTest/650spin/hpb_650test_1"), ncol = 5, validate = T)
 
-read_plot_rhessys(outname = paste0(devpath, "out/apr13RouteTest/COWTest3/hpb_test_4cow_noSR"), ncol = 5, validate = T)
+
+
+
+
 
 ##routing
 
 ##read in streamrouting 
 # col_names <- c("day","month","year","reachID","Qout","lateralinput","Qin","waterdepth","reservoir.store","NO3_out","NH4_out","DON_out","DOC_out")
 
-df <- read.table(paste0(devpath, "out/apr13RouteTest/COWTest3/hpb_test_4cow_streamrouting.daily"),
-                 header = TRUE)
-head(df)
-
-df |> 
-  mutate(date = ymd(paste(year, month, day, sep = "-"))) |> 
-  select(date, everything()) |> 
-  pivot_longer(-c(1:5)) |> 
-  ggplot(aes(x = date, y = value, color = as.factor(reachID)))+
-  geom_point()+ facet_wrap(~name, scales = "free_y")+ theme_bw()
+# df <- read.table(paste0(devpath, "out/apr16RouteTest/650spin/hpb_650test_1_streamrouting.daily"),
+#                  header = TRUE)
+# head(df)
+# 
+# df |> 
+#   mutate(date = ymd(paste(year, month, day, sep = "-"))) |> 
+#   select(date, everything()) |> 
+#   pivot_longer(-c(1:5)) |> 
+#   ggplot(aes(x = date, y = value, color = as.factor(reachID)))+
+#   geom_point()+ facet_wrap(~name, scales = "free_y")+ theme_bw()
 
 ```
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ```{r}
 #n-cycle validate
-zz <- readin_rhessys_output(paste0(devpath, "out/apr13RouteTest/COWTest3/hpb_test_4cow"))
+zz <- readin_rhessys_output(paste0(devpath, "out/apr16RouteTest/650spin/hpb_650test_1"))
 # zz <- readin_rhessys_output(paste0(devpath, "out/apr13RouteTest/COWTest1/hpb_test_1cow")) #when gw and stream ~ =
 
 zz$bdg |> dplyr::select(date, #year,
@@ -111,129 +129,6 @@ zz$bdg |> dplyr::select(date, #year,
 # plotly::ggplotly(zzzzz)
 
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-## Look at patches 
-
-
-```{r}
-
-
-
-
-
-
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-## Look at basin level output for with stream routing vs without
-
-
-```{r}
-devpath <- "C:/Users/dwh18/OneDrive/Desktop/R_Projects/RHESSys_development/RHESSys_Tutorial/HPB_files_NewMaps/"
-```
-
-
-#small patch tes
-
-```{r}
-read_plot_rhessys(outname = paste0(devpath, "out/SmallPatch/RouteTest100yr/hpb_RouteTests"), 
-                  date_filter = as.Date("1960-01-01"), ncol = 5, validate = F)
-
-##read in streamrouting 
-col_names <- c("day","month","year","reachID","Qout","lateralinput","Qin","waterdepth","reservoir.store","NO3_out","NH4_out","DON_out","DOC_out")
-
-df <- read.table(paste0(devpath, "out/SmallPatch/RouteTest100yr/hpb_RouteTests_streamrouting.daily"),
-                 header = TRUE, col.names = col_names, fill = TRUE)
-head(df)
-
-df |> 
-  mutate(date = ymd(paste(year, month, day, sep = "-"))) |> 
-  select(date, everything()) |> 
-  pivot_longer(-c(1:5)) |> 
-  ggplot(aes(x = date, y = value, color = as.factor(reachID)))+
-  geom_point()+ facet_wrap(~name, scales = "free_y")+ theme_bw()
-
-```
-
-
-
-
-# ROUTING V NO ROUTING alt cut patches
-
-```{r}
-#with routing
-
-# dat = readin_rhessys_output(outname)
-# z <- dat$bd
-read_plot_rhessys(outname = paste0(devpath, "out/RouteTest100yr/hpb_RouteTest_1"), 
-                  date_filter = as.Date("1960-01-01"), ncol = 5, validate = F)
-
-
-#no routing 
-read_plot_rhessys(outname = paste0(devpath, "out/RouteTest100yr/hpb_RouteTest_NOROUTE"), 
-                  date_filter = as.Date("1960-01-01"), ncol = 5, validate = F)
-
-##read in streamrouting 
-col_names <- c("day","month","year","reachID","Qout","lateralinput","Qin","waterdepth","reservoir.store","NO3_out","NH4_out","DON_out","DOC_out")
-
-df <- read.table("C:/Users/dwh18/OneDrive/Desktop/R_Projects/RHESSys_development/RHESSys_Tutorial/HPB_files_NewMaps/out/RouteTest100yr/hpb_RouteTest_1_streamrouting.daily",
-                 header = TRUE, col.names = col_names, fill = TRUE)
-head(df)
-
-df |> 
-  mutate(date = ymd(paste(year, month, day, sep = "-"))) |> 
-  select(date, everything()) |> 
-  pivot_longer(-c(1:5)) |> 
-  ggplot(aes(x = date, y = value, color = as.factor(reachID)))+
-  geom_point()+ facet_wrap(~name, scales = "free_y")+ theme_bw()
-
-```
-
-
-
-
-
-
-
-
 
 
 
