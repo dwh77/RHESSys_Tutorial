@@ -7,6 +7,8 @@
 #   M1: fDOM ~ fDOM_lag1
 #   M2: fDOM ~ fDOM_lag1 + Temp + DO + SW
 #   M3: fDOM ~ fDOM_lag1 + Temp + DO + SW + RH_DOC_streamflow
+#   M4: fDOM ~ fDOM_lag1 + Temp + DO + SW + RH_DOC + RH_Q
+#   M5: fDOM ~ fDOM_lag1 + Temp + DO + SW + RH_Q
 #
 # Forecasting approach (following Lofton et al.):
 #   - Covariates use observed values at the forecast timestep
@@ -64,19 +66,19 @@ mod_m3 <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1 +
 summary(mod_m3)
 
 
-# M4: lag + environmental covariates + RHESSys DOC streamflow 10 day mean
+# M4: lag + environmental covariates + RHESSys DOC + RHESSys Q
 train_m4 <- train_df |>
   filter(!is.na(fDOM_1_QSU_daily), !is.na(fDOM_1m_lag1),
          !is.na(Temp_1_C_daily), !is.na(DOsat_1_pct_daily), !is.na(SW_Wm2_daily),
-         !is.na(RH_DOCload_10day))
+         !is.na(RH_Q_m3day), !is.na(RH_DOC_mgL))
 
 mod_m4 <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1 +
                 Temp_1_C_daily + DOsat_1_pct_daily + SW_Wm2_daily +
-                RH_DOCload_10day,
+                RH_Q_m3day + RH_DOC_mgL,
               data = train_m4, family = gaussian, na.action = na.fail)
 summary(mod_m4)
 
-# M4: lag + environmental covariates + RHESSys Q
+# M5: lag + environmental covariates + RHESSys Q
 train_m5 <- train_df |>
   filter(!is.na(fDOM_1_QSU_daily), !is.na(fDOM_1m_lag1),
          !is.na(Temp_1_C_daily), !is.na(DOsat_1_pct_daily), !is.na(SW_Wm2_daily),
@@ -171,7 +173,7 @@ test_m2 <- forecast_fdom_ar(
 test_m3 <- forecast_fdom_ar(
   ref_date   = test_ref_date,
   model      = mod_m3,
-  model_name = "M3_lag_env_RH",
+  model_name = "M3_lag_env_RHdocload",
   horizon    = 30,
   all_data   = ar_df,
   covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
@@ -181,11 +183,11 @@ test_m3 <- forecast_fdom_ar(
 test_m4 <- forecast_fdom_ar(
   ref_date   = test_ref_date,
   model      = mod_m4,
-  model_name = "M4_lag_env_RH",
+  model_name = "M4_lag_env_RHdocQ",
   horizon    = 30,
   all_data   = ar_df,
   covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
-                 "RH_DOCload_10day")
+                 "RH_Q_m3day", "RH_DOC_mgL")
 )
 
 test_m5 <- forecast_fdom_ar(
@@ -236,17 +238,17 @@ forecasts_m2 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
 ))
 
 forecasts_m3 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
-  ref_date = d, model = mod_m3, model_name = "M3_lag_env_RH",
+  ref_date = d, model = mod_m3, model_name = "M3_lag_env_RHdocload",
   horizon = 30, all_data = ar_df,
   covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
                  "RH_streamflow_DOC_gm2day")
 ))
 
 forecasts_m4 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
-  ref_date = d, model = mod_m4, model_name = "M4_lag_env_RH",
+  ref_date = d, model = mod_m4, model_name = "M4_lag_env_RHdocQ",
   horizon = 30, all_data = ar_df,
   covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
-                 "RH_DOCload_10day")
+                 "RH_Q_m3day", "RH_DOC_mgL")
 ))
 
 forecasts_m5 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
@@ -259,7 +261,6 @@ forecasts_m5 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
 all_forecasts <- bind_rows(forecasts_m1, forecasts_m2, forecasts_m3,
                            forecasts_m4, forecasts_m5)
 # all_forecasts <- bind_rows(forecasts_m3, forecasts_m4)
-
   #pivot_wider(names_from = model_id, values_from = prediction)
 
 # Optionally save
@@ -282,8 +283,95 @@ rmse_by_horizon <- all_forecasts_obs |>
 
 # --- Plot ---
 ggplot(rmse_by_horizon, aes(x = horizon, y = RMSE, col = model_id)) +
-  geom_line() +
-  geom_point() +
+  geom_line(linewidth = 0.5) +
+  geom_point(size = 1.4) +
   labs(title = "Forecast skill by horizon",
     x = "Forecast horizon (days ahead)",    y = "RMSE (QSU)") +
-  theme_bw()
+  theme_bw()+ theme(legend.position = "top", text = element_text(size = 14))
+
+
+### show train vs fitted and can specify horizon ----
+
+# --- Prep: add fitted values to each training data frame ---
+train_m1_fitted <- train_m1 |> mutate(fitted = predict(mod_m1, newdata = train_m1))
+train_m2_fitted <- train_m2 |> mutate(fitted = predict(mod_m2, newdata = train_m2))
+train_m3_fitted <- train_m3 |> mutate(fitted = predict(mod_m3, newdata = train_m3))
+train_m4_fitted <- train_m4 |> mutate(fitted = predict(mod_m4, newdata = train_m4))
+train_m5_fitted <- train_m5 |> mutate(fitted = predict(mod_m5, newdata = train_m5))
+
+
+# --- Prep: join observed fDOM onto forecast output (by forecast_date) ---
+# Do this for whichever forecast objects you want to plot
+forecasts_m1_obs <- forecasts_m1 |>
+  left_join(ar_df |> select(Date, fDOM_obs = fDOM_1_QSU_daily),
+            by = c("forecast_date" = "Date"))
+
+forecasts_m2_obs <- forecasts_m2 |>
+  left_join(ar_df |> select(Date, fDOM_obs = fDOM_1_QSU_daily),
+            by = c("forecast_date" = "Date"))
+
+forecasts_m3_obs <- forecasts_m3 |>
+  left_join(ar_df |> select(Date, fDOM_obs = fDOM_1_QSU_daily),
+            by = c("forecast_date" = "Date"))
+
+forecasts_m4_obs <- forecasts_m4 |>
+  left_join(ar_df |> select(Date, fDOM_obs = fDOM_1_QSU_daily),
+            by = c("forecast_date" = "Date"))
+
+forecasts_m5_obs <- forecasts_m5 |>
+  left_join(ar_df |> select(Date, fDOM_obs = fDOM_1_QSU_daily),
+            by = c("forecast_date" = "Date"))
+
+# --- Plot function ---
+# df_train : training data frame with a 'fitted' column added (see prep above)
+# df_test  : forecast output with 'fDOM_obs' column joined (see prep above)
+# model_id_str : character matching the model_id column in df_test
+# horizon  : integer, which forecast horizon to show in the test panel
+
+plot_ar_forecast <- function(model_id_str, df_train, df_test, horizon) {
+
+  test_h <- df_test |>
+    filter(model_id == model_id_str, horizon == !!horizon)
+
+  obs_data <- bind_rows(
+    df_train |> select(Date, fDOM = fDOM_1_QSU_daily),
+    test_h   |> select(Date = forecast_date, fDOM = fDOM_obs)
+  ) |>
+    filter(!is.na(fDOM)) |>
+    mutate(series = "Observed")
+
+  train_fit <- df_train |>
+    filter(!is.na(fitted)) |>
+    select(Date, fDOM = fitted) |>
+    mutate(series = "Training fit")
+
+  test_pred <- test_h |>
+    filter(!is.na(prediction)) |>
+    select(Date = forecast_date, fDOM = prediction) |>
+    mutate(series = "Test prediction")
+
+  plot_df <- bind_rows(obs_data, train_fit, test_pred)
+
+  ggplot(plot_df, aes(x = Date, y = fDOM, color = series)) +
+    geom_point(size = 1.2, alpha = 0.8) +
+    geom_vline(xintercept = as.Date("2024-01-01"),
+               linetype = "dashed", color = "gray40") +
+    scale_color_manual(
+      values = c("Observed"        = "black",
+                 "Training fit"    = "orange",
+                 "Test prediction" = "dodgerblue"),
+      breaks = c("Observed", "Training fit", "Test prediction")
+    ) +
+    labs(
+      title = paste0(model_id_str, "  |  horizon = ", horizon, " day(s)"),
+      x = "Date", y = "fDOM (QSU)", color = NULL
+    ) +
+    theme_bw() +
+    theme(legend.position = "top")
+}
+
+# --- Example calls ---
+plot_ar_forecast("M1_lag1only", train_m1_fitted, forecasts_m1_obs, horizon = 1)
+plot_ar_forecast("M1_lag1only", train_m1_fitted, forecasts_m1_obs, horizon = 30)
+plot_ar_forecast("M2_lag_env",  train_m2_fitted, forecasts_m2_obs, horizon = 30)
+plot_ar_forecast("M4_lag_env_RHdocQ", train_m4_fitted, forecasts_m4_obs, horizon = 30)
