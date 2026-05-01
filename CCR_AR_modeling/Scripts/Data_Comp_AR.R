@@ -88,7 +88,7 @@ AR_df <- full_join(daily_met, catwalk_daily, by = "Date")
 AR_df <- read_csv("./CCR_AR_Modeling/Data/Daily_catwalk_met_2021_2025.csv")
 
 ##read in RHESSys
-workpath <- "C:/Users/dwh18/OneDrive/Desktop/R_Projects/RHESSys_development/ccr_rhessys/out/ccr_patch500"
+workpath <- "C:/Users/dwh18/OneDrive/Desktop/R_Projects/RHESSys_development/ccr_rhessys/out/ccr_patch1500_KEEP"
 
 output_grow <- read_delim(paste0(workpath, "/harvest1850_2025run_grow_basin.daily"),
                           delim = " ", col_names = T)

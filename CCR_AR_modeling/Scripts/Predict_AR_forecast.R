@@ -18,7 +18,11 @@ library(lubridate)
 
 #### Load data ----
 ar_df <- read_csv("./CCR_AR_Modeling/Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
-  mutate(Date = as.Date(Date))
+  mutate(Date = as.Date(Date),
+         RH_DOCload_10day = slider::slide_dbl(RH_streamflow_DOC_gm2day, mean,  #RH_streamflow_DOC_gm2day
+                                              .before = 10, .after = 0, .complete = F)
+  )
+
 
 
 #### Training data (pre-2024) ----
@@ -58,6 +62,31 @@ mod_m3 <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1 +
                 RH_streamflow_DOC_gm2day,
               data = train_m3, family = gaussian, na.action = na.fail)
 summary(mod_m3)
+
+
+# M4: lag + environmental covariates + RHESSys DOC streamflow 10 day mean
+train_m4 <- train_df |>
+  filter(!is.na(fDOM_1_QSU_daily), !is.na(fDOM_1m_lag1),
+         !is.na(Temp_1_C_daily), !is.na(DOsat_1_pct_daily), !is.na(SW_Wm2_daily),
+         !is.na(RH_DOCload_10day))
+
+mod_m4 <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1 +
+                Temp_1_C_daily + DOsat_1_pct_daily + SW_Wm2_daily +
+                RH_DOCload_10day,
+              data = train_m4, family = gaussian, na.action = na.fail)
+summary(mod_m4)
+
+# M4: lag + environmental covariates + RHESSys Q
+train_m5 <- train_df |>
+  filter(!is.na(fDOM_1_QSU_daily), !is.na(fDOM_1m_lag1),
+         !is.na(Temp_1_C_daily), !is.na(DOsat_1_pct_daily), !is.na(SW_Wm2_daily),
+         !is.na(RH_Q_m3day))
+
+mod_m5 <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1 +
+                Temp_1_C_daily + DOsat_1_pct_daily + SW_Wm2_daily +
+                RH_Q_m3day,
+              data = train_m5, family = gaussian, na.action = na.fail)
+summary(mod_m5)
 
 
 #### Forecast function ----
@@ -119,7 +148,7 @@ forecast_fdom_ar <- function(ref_date, model, model_name, horizon = 30,
 
 
 #### Test with a single reference date ----
-test_ref_date <- ymd("2024-10-01")
+test_ref_date <- ymd("2024-09-25")
 
 test_m1 <- forecast_fdom_ar(
   ref_date   = test_ref_date,
@@ -149,8 +178,28 @@ test_m3 <- forecast_fdom_ar(
                  "RH_streamflow_DOC_gm2day")
 )
 
+test_m4 <- forecast_fdom_ar(
+  ref_date   = test_ref_date,
+  model      = mod_m4,
+  model_name = "M4_lag_env_RH",
+  horizon    = 30,
+  all_data   = ar_df,
+  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+                 "RH_DOCload_10day")
+)
+
+test_m5 <- forecast_fdom_ar(
+  ref_date   = test_ref_date,
+  model      = mod_m5,
+  model_name = "M5_lag_env_RHQ",
+  horizon    = 30,
+  all_data   = ar_df,
+  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+                 "RH_Q_m3day")
+)
+
 # Quick plot of single-date test
-test_all <- bind_rows(test_m1, test_m2, test_m3) |>
+test_all <- bind_rows(test_m1, test_m2, test_m3, test_m4, test_m5) |>
   left_join(ar_df |> select(Date, fDOM_1_QSU_daily),
             by = c("forecast_date" = "Date"))
 
@@ -193,14 +242,30 @@ forecasts_m3 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
                  "RH_streamflow_DOC_gm2day")
 ))
 
-all_forecasts <- bind_rows(forecasts_m1, forecasts_m2, forecasts_m3)
+forecasts_m4 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
+  ref_date = d, model = mod_m4, model_name = "M4_lag_env_RH",
+  horizon = 30, all_data = ar_df,
+  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+                 "RH_DOCload_10day")
+))
+
+forecasts_m5 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
+  ref_date = d, model = mod_m5, model_name = "M5_lag_env_RHQ",
+  horizon = 30, all_data = ar_df,
+  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+                 "RH_Q_m3day")
+))
+
+all_forecasts <- bind_rows(forecasts_m1, forecasts_m2, forecasts_m3,
+                           forecasts_m4, forecasts_m5)
+# all_forecasts <- bind_rows(forecasts_m3, forecasts_m4)
+
   #pivot_wider(names_from = model_id, values_from = prediction)
 
 # Optionally save
-# write_csv(all_forecasts, "./CCR_AR_Modeling/Data/fDOM_1m_forecasts_2024.csv")
+# write_csv(all_forecasts, "./CCR_AR_Modeling/Data/fDOM_1m_forecasts_2024_30apr26.csv")
 
 
-library(tidyverse)
 
 # --- Append observed fDOM joined by forecast_date ---
 all_forecasts_obs <- all_forecasts |>
