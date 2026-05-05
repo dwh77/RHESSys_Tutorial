@@ -6,6 +6,8 @@ date: "2026-03-15"
 
 ```{r}
 library(tidyverse)
+library(dataRetrieval)
+library(ggpmisc)
 ```
 
 
@@ -13,14 +15,92 @@ library(tidyverse)
 ## Get daily Q from HPB PT
 
 ```{r}
-hpb_stage_STAGED <- read_csv("https://pasta-s.lternet.edu/package/data/eml/edi/1781/12/630f42ffb3560c3a6afd592511756c1e")
+hpb_stage_EDI <- read_csv("https://pasta.lternet.edu/package/data/eml/edi/2333/1/630f42ffb3560c3a6afd592511756c1e")
 
-daily_Q <- hpb_stage_STAGED |> 
+daily_Q <- hpb_stage_EDI |> 
   mutate(Date = as.Date(DateTime)) |> 
   group_by(Date) |> 
   summarise(Q_cms_PT = mean(Flow_cms, na.rm = T)) |> 
-  mutate(Q_L_s_PT = Q_cms_PT * 1000) |> 
-  select(Date, Q_L_s_PT)
+  mutate(Q_L_s_PT = Q_cms_PT * 1000, # cms to L/s
+         HPB_Flow_m3_day = Q_cms_PT * 86400
+         ) 
+
+
+```
+
+
+USGS for comp/regression
+
+```{r}
+#pull in comparison USGS sites
+## HF data
+# ref_site <- "USGS-02055100"
+# USGS_Ref <- read_waterdata_continuous(
+#   monitoring_location_id = ref_site,
+#   parameter_code = "00060",
+#   properties = c("time", "value", "unit_of_measure"),
+#   time = paste0(min(hpb_stage_EDI$DateTime),"/",max(hpb_stage_EDI$DateTime))
+# )
+
+# Daily Q
+ref_site <- "02055100"
+
+USGS_daily <- readNWISdv(
+  siteNumbers = ref_site,
+  parameterCd = "00060",          # discharge in cfs
+  startDate = "2010-01-01",
+  endDate   = "2026-04-01"
+) |>
+  renameNWISColumns()  
+
+USGS_Ref <- USGS_daily |>
+  mutate(Tinker_Flow_cms = Flow / 35.3, #cfs to cms
+         Tinker_Flow_m3_day = Tinker_Flow_cms * 86400 ) |> 
+  select(Date, Tinker_Flow_m3_day)
+
+# comp <- ggplot(Q_final, aes(x = DateTime)) +
+#   geom_point(aes(y = Flow_cms), shape = 20) +
+#   geom_line(data = USGS_Ref, aes(x = time, y = Flow_cms), color = "blue") +
+#   # scale_y_log10()+
+#   ggtitle(paste("Flow at", res, site, "and Comparison Site", ref_site))
+
+
+
+```
+
+
+USGS ~ HPB
+
+```{r}
+usgs_hbp_Q <- full_join(USGS_Ref, daily_Q) 
+
+usgs_hbp_Q_filt <- usgs_hbp_Q |> 
+  filter(Date < ymd("2025-04-01")) 
+
+usgs_hbp_Q |> 
+    ggplot(aes(x = (Tinker_Flow_m3_day), y = (HPB_Flow_m3_day)))+
+  geom_point()+
+  #scale_y_log10()+
+  stat_poly_line(method = "lm", linewidth = 2) +
+  stat_poly_eq(formula = y ~ x, label.x = "left", label.y = "top", parse = TRUE,
+    inherit.aes = FALSE, aes(x = Tinker_Flow_m3_day, y = HPB_Flow_m3_day,
+        label = paste(..adj.rr.label.., ..p.value.label.., sep = "~~~"), size = 3)  ) +
+  theme_bw()
+
+
+lm_tinker <- lm(HPB_Flow_m3_day ~ Tinker_Flow_m3_day, data = usgs_hbp_Q_filt)
+summary(lm_tinker)
+lm_tinker
+
+usgs_hbp_Q <- usgs_hbp_Q |> 
+  mutate(HPB_Q_lm_m3_day = predict(lm_tinker, newdata = usgs_hbp_Q))
+
+
+usgs_hbp_Q |> 
+  filter(Date > ymd("2024-05-01")) |> 
+  select(Date, HPB_Flow_m3_day, HPB_Q_lm_m3_day) |> 
+  pivot_longer(-1) |> 
+  ggplot(aes(x = Date, y = value, col = name))+ geom_point()
 
 
 ```
@@ -31,13 +111,22 @@ daily_Q <- hpb_stage_STAGED |>
 ```{r}
 flowmate_edi <- read_csv("https://pasta.lternet.edu/package/data/eml/edi/454/9/0e7fe16623a1ad2a67774c23ce8a29d8")
 
-hpb_flowmate <- flowmate_edi |> 
-  filter(Reservoir == "CCR", Site %in% c(101, 100)) |> 
-  mutate(Date = as.Date(DateTime)) |> 
-  dplyr::select(Date, Flow_cms) |> 
-  dplyr::rename(Q_cms_Flowmate = Flow_cms) |> 
-  mutate(Q_L_s_Flowmate = Q_cms_Flowmate * 1000) |> 
-  select(Date, Q_L_s_Flowmate)
+stream_flowmate <- flowmate_edi |>
+filter(Reservoir == "CCR",
+         Site %in% c(101, 100, 301, 300, 201, 200)) |>
+  mutate(Site = ifelse(Site %in% c(101,100), 100, Site),
+         Site = ifelse(Site %in% c(301,300), 300, Site),
+         Site = ifelse(Site %in% c(201,200), 200, Site)
+         ) |> 
+  mutate(Date = as.Date(DateTime)) |>
+  dplyr::select(Date, Site, Flow_cms) |>
+  dplyr::rename(Q_cms_Flowmate = Flow_cms) |>
+  mutate(Q_L_s_Flowmate = Q_cms_Flowmate * 1000,
+         Q_m3_day_flowmate = Q_cms_Flowmate * 86400) |>
+  select(Date, Site, Q_m3_day_flowmate)
+
+
+hpb_flowmate <- stream_flowmate |> filter(Site == 100 )
 
 ```
 
@@ -68,6 +157,52 @@ hpb_chem <- chem_EDI |>
   #select(Date, DOC_mgL, DON_mgL, NO3_mgL, NH4_mgL, DN_mgL, TN_mgL)
 
 
+stream_chem <- chem_EDI |> 
+  mutate(Date = as.Date(DateTime)) |> 
+  filter(Reservoir == "CCR",
+         Site %in% c(101, 100, 301, 300, 201, 200)) |>
+  mutate(Site = ifelse(Site %in% c(101,100), 100, Site),
+         Site = ifelse(Site %in% c(301,300), 300, Site),
+         Site = ifelse(Site %in% c(201,200), 200, Site)
+         ) |> 
+  select(Reservoir, Site, Date, Depth_m, Rep, DOC_mgL, DN_mgL, NO3NO2_ugL, NH4_ugL, SRP_ugL, TN_ugL, TP_ugL) |> 
+  group_by(Date, Site) |> 
+  summarise(across(c(DOC_mgL, DN_mgL, NO3NO2_ugL, NH4_ugL, SRP_ugL, TN_ugL, TP_ugL), mean, na.rm = TRUE)) |> 
+  mutate(DON_mgL = DN_mgL - ((NO3NO2_ugL + NH4_ugL)/1000)) |> 
+  #make all mg/L and drop P for now
+  mutate(NO3_mgL = NO3NO2_ugL / 1000,
+         NH4_mgL = NH4_ugL/1000,
+         TN_mgL = TN_ugL/1000) |> 
+  #round to 3 decimals 
+  pivot_longer(-c(1:2)) |> 
+  mutate(value = round(value, 3)) |> 
+  pivot_wider(names_from = name, values_from = value) |> 
+  select(Date, Site, DOC_mgL, DON_mgL, NO3_mgL, NH4_mgL)
+  #select(Date, DOC_mgL, DON_mgL, NO3_mgL, NH4_mgL, DN_mgL, TN_mgL)
+
+
+
+```
+
+## stream chem to flowmate; synoptic
+
+```{r}
+stream_synoptic <- full_join(stream_chem, stream_flowmate, by = c("Date", "Site"))
+
+# write.csv(stream_synoptic, "./StreamSynoptic_2020_2025.csv", row.names = F)
+
+stream_synoptic |> 
+  mutate(year = year(Date)) |> filter(year == 2022) |> 
+  ggplot(aes(x=Date, y = Q_m3_day_flowmate, color = as.factor(Site)))+
+  geom_point() + scale_y_log10()
+
+
+stream_synoptic |> 
+  select(-Q_m3_day_flowmate) |> 
+  pivot_longer(-c(1:2)) |> 
+  ggplot(aes( x= Site, y = value, color = as.factor(Site), group = Site))+
+  geom_point()+geom_boxplot()+
+  facet_wrap(~name, scales = "free_y")
 
 ```
 
@@ -121,6 +256,139 @@ lai <- read_csv("./LAI_modisData_nov2002_jan2026.csv") |>
 
 
 ```
+
+New MODIS code
+
+```{r}
+library(MODISTools)
+library(tidyverse)
+library(lubridate)
+
+ccrws_lat <- 37.384756
+ccrws_long <- -79.971753
+
+# Define a bounding box buffer (in km) around your watershed center
+# Adjust km_ab and km_lr to cover your watershed extent
+lai_raw <- MODISTools::mt_subset(
+  product = "MCD15A2H",
+  lat = ccrws_lat,
+  lon = ccrws_long,
+  band = c("Lai_500m", "FparLai_QC"),
+  start = as_date("2020-01-01"),
+  end = Sys.Date(),
+  site_name = "HPB",
+  km_ab = 10,       # km above/below center (north/south)
+  km_lr = 10,       # km left/right of center (east/west)
+  progress = FALSE
+)
+
+
+lai_avg <- lai_raw |>
+  mutate(
+    scale = ifelse(band == "FparLai_QC", 1, scale),
+    scale = as.numeric(scale),
+    value = scale * value,
+    datetime = as_date(calendar_date)
+  ) |>
+  select(band, value, datetime, pixel) |>
+  pivot_wider(names_from = band, values_from = value) |>
+  filter(FparLai_QC == 0) |>                    # keep only good quality pixels
+  group_by(datetime) |>
+  summarise(
+    observation = mean(Lai_500m, na.rm = TRUE),  # average across all pixels
+    n_pixels = n(),
+    .groups = "drop"
+  ) |>
+  mutate(variable = "lai")
+
+
+
+```
+
+
+make lai map
+
+```{r}
+lai_spatial <- lai_raw |>
+  mutate(
+    scale = ifelse(band == "FparLai_QC", 1, scale),
+    scale = as.numeric(scale),
+    value = scale * value,
+    datetime = as_date(calendar_date)
+  ) |>
+  select(band, value, datetime, pixel, latitude, longitude) |>
+  pivot_wider(names_from = band, values_from = value) |>
+  filter(FparLai_QC == 0) |>
+  rename(lai = Lai_500m)
+
+unique(lai_spatial$datetime)
+
+# Example: map LAI for a single date
+library(sf)
+
+# Reconstruct pixel centers in sinusoidal projection
+pixel_coords <- lai_raw |>
+  select(pixel, ncols, nrows, xllcorner, yllcorner, cellsize) |>
+  distinct() |>
+  mutate(across(c(ncols, nrows, xllcorner, yllcorner, cellsize), as.numeric)) |>
+  mutate(
+    col = (pixel - 1) %% ncols,
+    row = (pixel - 1) %/% ncols,
+    x_sin = xllcorner + col * cellsize + cellsize / 2,
+    y_sin = yllcorner + (nrows - row - 1) * cellsize + cellsize / 2
+  ) |>
+  select(pixel, x_sin, y_sin)
+
+# Convert to sf and reproject to WGS84
+pixel_coords_wgs84 <- pixel_coords |>
+  st_as_sf(coords = c("x_sin", "y_sin"), crs = "+proj=sinu +R=6371007.181 +nadgrids=@null +wktext") |>
+  st_transform(crs = 4326) |>
+  mutate(
+    lon = st_coordinates(geometry)[, 1],
+    lat = st_coordinates(geometry)[, 2]
+  ) |>
+  st_drop_geometry() |>
+  select(pixel, lat, lon)
+
+# Join back
+lai_spatial <- lai_spatial |>
+  left_join(pixel_coords_wgs84, by = "pixel")
+
+# Map
+lai_spatial |>
+  filter(datetime == as_date("2020-07-11")) |>
+  ggplot(aes(x = lon, y = lat, fill = lai)) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "LAI", na.value = "grey80") +
+  coord_equal() +
+  theme_minimal()
+
+# option 1 - geom_raster (fastest, best for regular grids)
+lai_spatial |>
+  filter(datetime == as_date("2020-07-11")) |>
+  ggplot(aes(x = lon, y = lat, fill = lai)) +
+  geom_raster() +
+  scale_fill_viridis_c(name = "LAI", na.value = "grey80") +
+  theme_minimal()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 ##join data together
