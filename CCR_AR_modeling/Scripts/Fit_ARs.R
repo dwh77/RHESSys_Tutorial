@@ -1,6 +1,6 @@
 #### Fit AR models
 
-
+getwd()
 #packages
 library(tidyverse)
 library(MuMIn) #dredge
@@ -130,7 +130,7 @@ ar_df |>
 fdom9m <- ar_df %>%
   dplyr::select(Date, fDOM_9_QSU_daily, fDOM_9m_lag1_ZS, Chla_1_ugL_daily_ZS, DOsat_9_pct_daily_ZS,
                 Temp_9_C_daily_ZS, Chla_1_ugL_10day_ZS, SW_Wm2_daily_ZS,
-                Q_rhessys_ZS, DOC_rhessys_ZS
+                RH_Q_m3day_ZS, RH_DOC_mgL_ZS
                 ) %>%
   filter(Date < ymd("2024-01-01")) %>%
   mutate(Date = as.Date(Date))
@@ -283,8 +283,8 @@ plot_fdom9m(predRH_df_fdom9m, model_label = "AR + RH Model")
 #### Set up data ----
 fdom1m <- ar_df %>%
   dplyr::select(Date, fDOM_1_QSU_daily, fDOM_1m_lag1_ZS, Chla_1_ugL_daily_ZS, DOsat_1_pct_daily_ZS,
-                Temp_1_C_daily_ZS, Chla_1_ugL_10day_ZS, SW_Wm2_daily_ZS,
-                Q_rhessys_ZS, DOC_rhessys_ZS
+                Temp_1_C_daily_ZS, Chla_1_ugL_10day_ZS, SW_Wm2_daily_ZS
+                #Q_rhessys_ZS, DOC_rhessys_ZS
   ) %>%
   filter(Date < ymd("2024-01-01")) %>%
   mutate(Date = as.Date(Date))

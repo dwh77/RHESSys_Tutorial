@@ -1,5 +1,5 @@
 #### AR Model Forecasting — 30-day ahead predictions for 2024
-# Focal variable: fDOM_1_QSU_daily (1m depth, temperature-corrected fDOM)
+# Focal variable: fDOM_9_QSU_daily (9m depth, temperature-corrected fDOM)
 #
 # Models trained on Date < 2024-01-01, evaluated on all 2024 reference dates.
 #
@@ -9,6 +9,10 @@
 #   M3: fDOM ~ fDOM_lag1 + Temp + DO + SW + RH_DOC_streamflow
 #   M4: fDOM ~ fDOM_lag1 + Temp + DO + SW + RH_DOC + RH_Q
 #   M5: fDOM ~ fDOM_lag1 + Temp + DO + SW + RH_Q
+#   M6: fDOM ~ fDOM_lag1 + Temp + DO + SW + Rain
+#
+# Depth-specific variables: fDOM_9m_lag1, Temp_9_C_daily, DOsat_9_pct_daily
+# Shared variables:         SW_Wm2_daily, RH_Q_m3day, RH_DOC_mgL, Rain_mm_lag1
 #
 # Forecasting approach (following Lofton et al.):
 #   - Covariates use observed values at the forecast timestep
@@ -21,10 +25,9 @@ library(lubridate)
 #### Load data ----
 ar_df <- read_csv("./CCR_AR_Modeling/Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
   mutate(Date = as.Date(Date),
-         RH_DOCload_10day = slider::slide_dbl(RH_streamflow_DOC_gm2day, mean,  #RH_streamflow_DOC_gm2day
+         RH_DOCload_10day = slider::slide_dbl(RH_streamflow_DOC_gm2day, mean,
                                               .before = 10, .after = 0, .complete = F)
   )
-
 
 
 #### Training data (pre-2024) ----
@@ -35,32 +38,32 @@ train_df <- ar_df |> filter(Date < ymd("2024-01-01"))
 
 # M1: lag only
 train_m1 <- train_df |>
-  filter(!is.na(fDOM_1_QSU_daily), !is.na(fDOM_1m_lag1))
+  filter(!is.na(fDOM_9_QSU_daily), !is.na(fDOM_9m_lag1))
 
-mod_m1 <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1,
+mod_m1 <- glm(fDOM_9_QSU_daily ~ fDOM_9m_lag1,
               data = train_m1, family = gaussian, na.action = na.fail)
 summary(mod_m1)
 
 
 # M2: lag + environmental covariates
 train_m2 <- train_df |>
-  filter(!is.na(fDOM_1_QSU_daily), !is.na(fDOM_1m_lag1),
-         !is.na(Temp_1_C_daily), !is.na(DOsat_1_pct_daily), !is.na(SW_Wm2_daily))
+  filter(!is.na(fDOM_9_QSU_daily), !is.na(fDOM_9m_lag1),
+         !is.na(Temp_9_C_daily), !is.na(DOsat_9_pct_daily), !is.na(SW_Wm2_daily))
 
-mod_m2 <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1 +
-                Temp_1_C_daily + DOsat_1_pct_daily + SW_Wm2_daily,
+mod_m2 <- glm(fDOM_9_QSU_daily ~ fDOM_9m_lag1 +
+                Temp_9_C_daily + DOsat_9_pct_daily + SW_Wm2_daily,
               data = train_m2, family = gaussian, na.action = na.fail)
 summary(mod_m2)
 
 
 # M3: lag + environmental covariates + RHESSys DOC streamflow
 train_m3 <- train_df |>
-  filter(!is.na(fDOM_1_QSU_daily), !is.na(fDOM_1m_lag1),
-         !is.na(Temp_1_C_daily), !is.na(DOsat_1_pct_daily), !is.na(SW_Wm2_daily),
+  filter(!is.na(fDOM_9_QSU_daily), !is.na(fDOM_9m_lag1),
+         !is.na(Temp_9_C_daily), !is.na(DOsat_9_pct_daily), !is.na(SW_Wm2_daily),
          !is.na(RH_streamflow_DOC_gm2day))
 
-mod_m3 <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1 +
-                Temp_1_C_daily + DOsat_1_pct_daily + SW_Wm2_daily +
+mod_m3 <- glm(fDOM_9_QSU_daily ~ fDOM_9m_lag1 +
+                Temp_9_C_daily + DOsat_9_pct_daily + SW_Wm2_daily +
                 RH_streamflow_DOC_gm2day,
               data = train_m3, family = gaussian, na.action = na.fail)
 summary(mod_m3)
@@ -68,24 +71,25 @@ summary(mod_m3)
 
 # M4: lag + environmental covariates + RHESSys DOC + RHESSys Q
 train_m4 <- train_df |>
-  filter(!is.na(fDOM_1_QSU_daily), !is.na(fDOM_1m_lag1),
-         !is.na(Temp_1_C_daily), !is.na(DOsat_1_pct_daily), !is.na(SW_Wm2_daily),
+  filter(!is.na(fDOM_9_QSU_daily), !is.na(fDOM_9m_lag1),
+         !is.na(Temp_9_C_daily), !is.na(DOsat_9_pct_daily), !is.na(SW_Wm2_daily),
          !is.na(RH_Q_m3day), !is.na(RH_DOC_mgL))
 
-mod_m4 <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1 +
-                Temp_1_C_daily + DOsat_1_pct_daily + SW_Wm2_daily +
+mod_m4 <- glm(fDOM_9_QSU_daily ~ fDOM_9m_lag1 +
+                Temp_9_C_daily + DOsat_9_pct_daily + SW_Wm2_daily +
                 RH_Q_m3day + RH_DOC_mgL,
               data = train_m4, family = gaussian, na.action = na.fail)
 summary(mod_m4)
 
+
 # M5: lag + environmental covariates + RHESSys Q
 train_m5 <- train_df |>
-  filter(!is.na(fDOM_1_QSU_daily), !is.na(fDOM_1m_lag1),
-         !is.na(Temp_1_C_daily), !is.na(DOsat_1_pct_daily), !is.na(SW_Wm2_daily),
+  filter(!is.na(fDOM_9_QSU_daily), !is.na(fDOM_9m_lag1),
+         !is.na(Temp_9_C_daily), !is.na(DOsat_9_pct_daily), !is.na(SW_Wm2_daily),
          !is.na(RH_Q_m3day))
 
-mod_m5 <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1 +
-                Temp_1_C_daily + DOsat_1_pct_daily + SW_Wm2_daily +
+mod_m5 <- glm(fDOM_9_QSU_daily ~ fDOM_9m_lag1 +
+                Temp_9_C_daily + DOsat_9_pct_daily + SW_Wm2_daily +
                 RH_Q_m3day,
               data = train_m5, family = gaussian, na.action = na.fail)
 summary(mod_m5)
@@ -93,16 +97,15 @@ summary(mod_m5)
 
 # M6: lag + environmental covariates + Rain
 train_m6 <- train_df |>
-  filter(!is.na(fDOM_1_QSU_daily), !is.na(fDOM_1m_lag1),
-         !is.na(Temp_1_C_daily), !is.na(DOsat_1_pct_daily), !is.na(SW_Wm2_daily),
+  filter(!is.na(fDOM_9_QSU_daily), !is.na(fDOM_9m_lag1),
+         !is.na(Temp_9_C_daily), !is.na(DOsat_9_pct_daily), !is.na(SW_Wm2_daily),
          !is.na(Rain_mm_lag1))
 
-mod_m6 <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1 +
-                Temp_1_C_daily + DOsat_1_pct_daily + SW_Wm2_daily +
+mod_m6 <- glm(fDOM_9_QSU_daily ~ fDOM_9m_lag1 +
+                Temp_9_C_daily + DOsat_9_pct_daily + SW_Wm2_daily +
                 Rain_mm_lag1,
               data = train_m6, family = gaussian, na.action = na.fail)
 summary(mod_m6)
-
 
 
 #### Forecast function ----
@@ -122,7 +125,7 @@ forecast_fdom_ar <- function(ref_date, model, model_name, horizon = 30,
                               all_data, covar_cols = NULL) {
 
   # Seed the iterated lag with the observed fDOM at the reference date
-  obs_ref <- all_data |> filter(Date == ref_date) |> pull(fDOM_1_QSU_daily)
+  obs_ref <- all_data |> filter(Date == ref_date) |> pull(fDOM_9_QSU_daily)
   if (length(obs_ref) == 0 || is.na(obs_ref)) {
     message("No observed fDOM at ", ref_date, " — skipping.")
     return(NULL)
@@ -137,7 +140,7 @@ forecast_fdom_ar <- function(ref_date, model, model_name, horizon = 30,
     if (nrow(fc_row) == 0) next
 
     # The iterated lag is the previous day's prediction (raw QSU)
-    newdata <- data.frame(fDOM_1m_lag1 = prev_pred)
+    newdata <- data.frame(fDOM_9m_lag1 = prev_pred)
 
     # Pull observed covariates for this forecast date
     if (!is.null(covar_cols)) {
@@ -181,7 +184,7 @@ test_m2 <- forecast_fdom_ar(
   model_name = "M2_lag_env",
   horizon    = 30,
   all_data   = ar_df,
-  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily")
+  covar_cols = c("Temp_9_C_daily", "DOsat_9_pct_daily", "SW_Wm2_daily")
 )
 
 test_m3 <- forecast_fdom_ar(
@@ -190,7 +193,7 @@ test_m3 <- forecast_fdom_ar(
   model_name = "M3_lag_env_RHdocload",
   horizon    = 30,
   all_data   = ar_df,
-  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+  covar_cols = c("Temp_9_C_daily", "DOsat_9_pct_daily", "SW_Wm2_daily",
                  "RH_streamflow_DOC_gm2day")
 )
 
@@ -200,7 +203,7 @@ test_m4 <- forecast_fdom_ar(
   model_name = "M4_lag_env_RHdocQ",
   horizon    = 30,
   all_data   = ar_df,
-  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+  covar_cols = c("Temp_9_C_daily", "DOsat_9_pct_daily", "SW_Wm2_daily",
                  "RH_Q_m3day", "RH_DOC_mgL")
 )
 
@@ -210,7 +213,7 @@ test_m5 <- forecast_fdom_ar(
   model_name = "M5_lag_env_RHQ",
   horizon    = 30,
   all_data   = ar_df,
-  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+  covar_cols = c("Temp_9_C_daily", "DOsat_9_pct_daily", "SW_Wm2_daily",
                  "RH_Q_m3day")
 )
 
@@ -220,21 +223,21 @@ test_m6 <- forecast_fdom_ar(
   model_name = "M6_lag_env_Rain",
   horizon    = 30,
   all_data   = ar_df,
-  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+  covar_cols = c("Temp_9_C_daily", "DOsat_9_pct_daily", "SW_Wm2_daily",
                  "Rain_mm_lag1")
 )
 
 # Quick plot of single-date test
-test_all <- bind_rows(test_m1, test_m2, test_m4) |>
-  left_join(ar_df |> select(Date, fDOM_1_QSU_daily),
+test_all <- bind_rows(test_m1, test_m2, test_m3, test_m4, test_m5, test_m6) |>
+  left_join(ar_df |> select(Date, fDOM_9_QSU_daily),
             by = c("forecast_date" = "Date"))
 
 ggplot(test_all, aes(x = forecast_date, y = prediction, col = model_id)) +
   geom_line() +
-  geom_point(aes(y = fDOM_1_QSU_daily), col = "black", size = 1.5, alpha = 0.7) +
+  geom_point(aes(y = fDOM_9_QSU_daily), col = "black", size = 1.5, alpha = 0.7) +
   geom_vline(xintercept = as.numeric(test_ref_date), linetype = "dashed", color = "gray40") +
   labs(
-    title = paste("30-day forecast from", test_ref_date),
+    title = paste("30-day forecast from", test_ref_date, "(9m)"),
     x = "Date", y = "fDOM (QSU)", color = "Model"
   ) +
   theme_bw() + theme(legend.position = "top")
@@ -245,7 +248,7 @@ ggplot(test_all, aes(x = forecast_date, y = prediction, col = model_id)) +
 pred_dates_2024 <- ar_df |>
   filter(Date >= ymd("2024-01-01"),
          Date <  ymd("2025-01-01"),
-         !is.na(fDOM_1_QSU_daily)) |>
+         !is.na(fDOM_9_QSU_daily)) |>
   pull(Date)
 
 message("Running forecasts for ", length(pred_dates_2024), " reference dates...")
@@ -258,52 +261,48 @@ forecasts_m1 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
 forecasts_m2 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
   ref_date = d, model = mod_m2, model_name = "M2_lag_env",
   horizon = 30, all_data = ar_df,
-  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily")
+  covar_cols = c("Temp_9_C_daily", "DOsat_9_pct_daily", "SW_Wm2_daily")
 ))
 
 forecasts_m3 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
   ref_date = d, model = mod_m3, model_name = "M3_lag_env_RHdocload",
   horizon = 30, all_data = ar_df,
-  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+  covar_cols = c("Temp_9_C_daily", "DOsat_9_pct_daily", "SW_Wm2_daily",
                  "RH_streamflow_DOC_gm2day")
 ))
 
 forecasts_m4 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
   ref_date = d, model = mod_m4, model_name = "M4_lag_env_RHdocQ",
   horizon = 30, all_data = ar_df,
-  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+  covar_cols = c("Temp_9_C_daily", "DOsat_9_pct_daily", "SW_Wm2_daily",
                  "RH_Q_m3day", "RH_DOC_mgL")
 ))
 
 forecasts_m5 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
   ref_date = d, model = mod_m5, model_name = "M5_lag_env_RHQ",
   horizon = 30, all_data = ar_df,
-  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+  covar_cols = c("Temp_9_C_daily", "DOsat_9_pct_daily", "SW_Wm2_daily",
                  "RH_Q_m3day")
 ))
 
 forecasts_m6 <- map_dfr(pred_dates_2024, \(d) forecast_fdom_ar(
   ref_date = d, model = mod_m6, model_name = "M6_lag_env_Rain",
   horizon = 30, all_data = ar_df,
-  covar_cols = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+  covar_cols = c("Temp_9_C_daily", "DOsat_9_pct_daily", "SW_Wm2_daily",
                  "Rain_mm_lag1")
 ))
 
 all_forecasts <- bind_rows(forecasts_m1, forecasts_m2, forecasts_m3,
                            forecasts_m4, forecasts_m5, forecasts_m6)
-# all_forecasts <- bind_rows(forecasts_m3, forecasts_m4)
-  #pivot_wider(names_from = model_id, values_from = prediction)
 
 # Optionally save
-#write_csv(all_forecasts, "./CCR_AR_Modeling/Data/fDOM_1m_forecasts_2024_30apr26.csv")
-all_forecasts <- read.csv("./CCR_AR_Modeling/Data/fDOM_1m_forecasts_2024_30apr26.csv") |>
-  mutate(forecast_date = as.Date(forecast_date))
+# write_csv(all_forecasts, "./CCR_AR_Modeling/Data/fDOM_9m_forecasts_2024.csv")
 
 
 # --- Append observed fDOM joined by forecast_date ---
 all_forecasts_obs <- all_forecasts |>
   left_join(
-    ar_df |> select(Date, fDOM_obs = fDOM_1_QSU_daily),
+    ar_df |> select(Date, fDOM_obs = fDOM_9_QSU_daily),
     by = c("forecast_date" = "Date")
   )
 
@@ -326,28 +325,23 @@ rmse_by_horizon_season <- all_forecasts_obs |>
 
 # --- Plot ---
 rmse_by_horizon |>
-  filter(model_id %in% c("M1_lag1only", "M2_lag_env", "M4_lag_env_RHdocQ", "M6_lag_env_Rain")) |>
+  #filter(model_id %in% c("M1_lag1only", "M2_lag_env", "M4_lag_env_RHdocQ", "M6_lag_env_Rain")) |>
   ggplot(aes(x = horizon, y = RMSE, col = model_id)) +
-    geom_line(linewidth = 0.8) +
-  geom_point(size = 1.8) +
-  labs(title = "Prediction skill by horizon",
-    x = "Prediction horizon (days ahead)",    y = "RMSE (QSU)") +
-  theme_bw()+ theme(legend.position = "top", text = element_text(size = 24))
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.4) +
+  labs(title = "Prediction skill by horizon (9m)",
+       x = "Prediction horizon (days ahead)", y = "RMSE (QSU)") +
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 18))
 
 rmse_by_horizon_season |>
-  filter(model_id %in% c("M1_lag1only", "M2_lag_env", "M4_lag_env_RHdocQ", "M6_lag_env_Rain")) |> #"M1_lag1only"
-  mutate(model_id2 = ifelse(model_id == "M1_lag1only", "1) AR only", NA),
-         model_id2 = ifelse(model_id == "M2_lag_env", "2) AR + lake", model_id2),
-         model_id2 = ifelse(model_id == "M4_lag_env_RHdocQ", "3) AR+lake+catchment", model_id2),
-         model_id2 = ifelse(model_id == "M6_lag_env_Rain", "4) AR+lake+rain", model_id2)
-         ) |>
-  ggplot(aes(x = horizon, y = RMSE, col = model_id2)) +
-  geom_line(linewidth = 0.8) +
-  geom_point(size = 1.8) +
-  facet_wrap(~Season , nrow = 1)+
-  labs(title = "Prediction skill by horizon",
-       x = "Prediction horizon (days ahead)",    y = "RMSE (QSU)") +
-  theme_bw()+ theme(legend.position = "top", text = element_text(size = 24))
+  #filter(model_id %in% c("M1_lag1only", "M2_lag_env", "M4_lag_env_RHdocQ", "M6_lag_env_Rain")) |>
+  ggplot(aes(x = horizon, y = RMSE, col = Season)) +
+  geom_line(linewidth = 0.5) +
+  geom_point(size = 1.4) +
+  facet_wrap(~model_id, nrow = 1) +
+  labs(title = "Prediction skill by horizon (9m)",
+       x = "Prediction horizon (days ahead)", y = "RMSE (QSU)") +
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 14))
 
 
 ### show train vs fitted and can specify horizon ----
@@ -358,34 +352,34 @@ train_m2_fitted <- train_m2 |> mutate(fitted = predict(mod_m2, newdata = train_m
 train_m3_fitted <- train_m3 |> mutate(fitted = predict(mod_m3, newdata = train_m3))
 train_m4_fitted <- train_m4 |> mutate(fitted = predict(mod_m4, newdata = train_m4))
 train_m5_fitted <- train_m5 |> mutate(fitted = predict(mod_m5, newdata = train_m5))
-train_m6_fitted <- train_m6 |> mutate(fitted = predict(mod_m6, newdata = train_m5))
+train_m6_fitted <- train_m6 |> mutate(fitted = predict(mod_m6, newdata = train_m6))
 
 
 # --- Prep: join observed fDOM onto forecast output (by forecast_date) ---
-# Do this for whichever forecast objects you want to plot
 forecasts_m1_obs <- forecasts_m1 |>
-  left_join(ar_df |> select(Date, fDOM_obs = fDOM_1_QSU_daily),
+  left_join(ar_df |> select(Date, fDOM_obs = fDOM_9_QSU_daily),
             by = c("forecast_date" = "Date"))
 
 forecasts_m2_obs <- forecasts_m2 |>
-  left_join(ar_df |> select(Date, fDOM_obs = fDOM_1_QSU_daily),
+  left_join(ar_df |> select(Date, fDOM_obs = fDOM_9_QSU_daily),
             by = c("forecast_date" = "Date"))
 
 forecasts_m3_obs <- forecasts_m3 |>
-  left_join(ar_df |> select(Date, fDOM_obs = fDOM_1_QSU_daily),
+  left_join(ar_df |> select(Date, fDOM_obs = fDOM_9_QSU_daily),
             by = c("forecast_date" = "Date"))
 
 forecasts_m4_obs <- forecasts_m4 |>
-  left_join(ar_df |> select(Date, fDOM_obs = fDOM_1_QSU_daily),
+  left_join(ar_df |> select(Date, fDOM_obs = fDOM_9_QSU_daily),
             by = c("forecast_date" = "Date"))
 
 forecasts_m5_obs <- forecasts_m5 |>
-  left_join(ar_df |> select(Date, fDOM_obs = fDOM_1_QSU_daily),
+  left_join(ar_df |> select(Date, fDOM_obs = fDOM_9_QSU_daily),
             by = c("forecast_date" = "Date"))
 
 forecasts_m6_obs <- forecasts_m6 |>
-  left_join(ar_df |> select(Date, fDOM_obs = fDOM_1_QSU_daily),
+  left_join(ar_df |> select(Date, fDOM_obs = fDOM_9_QSU_daily),
             by = c("forecast_date" = "Date"))
+
 
 # --- Plot function ---
 # df_train : training data frame with a 'fitted' column added (see prep above)
@@ -399,7 +393,7 @@ plot_ar_forecast <- function(model_id_str, df_train, df_test, horizon) {
     filter(model_id == model_id_str, horizon == !!horizon)
 
   obs_data <- bind_rows(
-    df_train |> select(Date, fDOM = fDOM_1_QSU_daily),
+    df_train |> select(Date, fDOM = fDOM_9_QSU_daily),
     test_h   |> select(Date = forecast_date, fDOM = fDOM_obs)
   ) |>
     filter(!is.na(fDOM)) |>
@@ -428,7 +422,7 @@ plot_ar_forecast <- function(model_id_str, df_train, df_test, horizon) {
       breaks = c("Observed", "Training fit", "Test prediction")
     ) +
     labs(
-      title = paste0(model_id_str, "  |  horizon = ", horizon, " day(s)"),
+      title = paste0(model_id_str, " (9m)  |  horizon = ", horizon, " day(s)"),
       x = "Date", y = "fDOM (QSU)", color = NULL
     ) +
     theme_bw() +
@@ -439,45 +433,41 @@ plot_ar_forecast <- function(model_id_str, df_train, df_test, horizon) {
 plot_ar_forecast("M1_lag1only", train_m1_fitted, forecasts_m1_obs, horizon = 1)
 plot_ar_forecast("M1_lag1only", train_m1_fitted, forecasts_m1_obs, horizon = 30)
 plot_ar_forecast("M2_lag_env",  train_m2_fitted, forecasts_m2_obs, horizon = 30)
-plot_ar_forecast("M4_lag_env_RHdocQ", train_m4_fitted, forecasts_m4_obs, horizon = 1)
+plot_ar_forecast("M4_lag_env_RHdocQ", train_m4_fitted, forecasts_m4_obs, horizon = 10)
 plot_ar_forecast("M6_lag_env_Rain", train_m6_fitted, forecasts_m6_obs, horizon = 1)
 
 
+#### Timeseries plots ----
 
-
-#### Make timeseries of training that shows different horizons
-## one model by horizons
+## One model, multiple horizons
 all_forecasts_obs |>
   filter(horizon %in% c(1,7,15,30)) |>
   filter(model_id %in% c("M4_lag_env_RHdocQ")) |>
-  ggplot()+
-  geom_line(aes(x = forecast_date, y = prediction, col = as.factor(horizon)), size = 1.1)+
-  geom_point(aes(x = forecast_date, y = fDOM_obs), size = 0.8)+
-  labs(x = "Date", y = "fDOM (QSU)", col = "Model Horizon", title = "M4_lag_env_RHdocQ")+
-  theme_bw()+ theme(legend.position = "top")
+  ggplot() +
+  geom_line(aes(x = forecast_date, y = prediction, col = as.factor(horizon)), size = 1.1) +
+  geom_point(aes(x = forecast_date, y = fDOM_obs), size = 0.8) +
+  labs(x = "Date", y = "fDOM (QSU)", col = "Model Horizon",
+       title = "M4_lag_env_RHdocQ (9m)") +
+  theme_bw() + theme(legend.position = "top")
 
-
-## one horizon, multi model
-all_forecasts_obs |>
-    filter(horizon %in% c(10)) |>
-    filter(model_id %in% c("M1_lag1only", "M2_lag_env", "M4_lag_env_RHdocQ")) |>
-    ggplot()+
-    geom_line(aes(x = forecast_date, y = prediction,
-                  col = model_id),       size = 1.1)+
-    geom_point(aes(x = forecast_date, y = fDOM_obs), size = 0.8)+
-    labs(x = "Date", y = "fDOM (QSU)", col = "Model Horizon", title = "10 day horizon")+
-  theme_bw()+ theme(legend.position = "top")
-
-## one horizon, multi model
+## One horizon, multiple models
 all_forecasts_obs |>
   filter(horizon %in% c(10)) |>
-  filter(model_id %in% c( "M4_lag_env_RHdocQ", "M6_lag_env_Rain")) |>
-  ggplot()+
-  geom_line(aes(x = forecast_date, y = prediction,
-                col = model_id),       size = 1.1)+
-  geom_point(aes(x = forecast_date, y = fDOM_obs), size = 0.8)+
-  labs(x = "Date", y = "fDOM (QSU)", col = "Model Horizon", title = "10 day horizon")+
-  theme_bw()+ theme(legend.position = "top")
+  filter(model_id %in% c("M1_lag1only", "M2_lag_env", "M4_lag_env_RHdocQ")) |>
+  ggplot() +
+  geom_line(aes(x = forecast_date, y = prediction, col = model_id), size = 1.1) +
+  geom_point(aes(x = forecast_date, y = fDOM_obs), size = 0.8) +
+  labs(x = "Date", y = "fDOM (QSU)", col = "Model",
+       title = "10 day horizon (9m)") +
+  theme_bw() + theme(legend.position = "top")
 
-
-
+## One horizon, RH models comparison
+all_forecasts_obs |>
+  filter(horizon %in% c(10)) |>
+  filter(model_id %in% c("M4_lag_env_RHdocQ", "M6_lag_env_Rain")) |>
+  ggplot() +
+  geom_line(aes(x = forecast_date, y = prediction, col = model_id), size = 1.1) +
+  geom_point(aes(x = forecast_date, y = fDOM_obs), size = 0.8) +
+  labs(x = "Date", y = "fDOM (QSU)", col = "Model",
+       title = "10 day horizon (9m)") +
+  theme_bw() + theme(legend.position = "top")
