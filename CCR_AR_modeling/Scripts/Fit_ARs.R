@@ -12,8 +12,53 @@ ar_df <- read_csv("./CCR_AR_Modeling/Data/Daily_catwalk_met_RH_2021_2025_lagZS.c
 head(ar_df)
 
 
-#### Nice plot of fDOM at 2 depths ----
-ar_df |>
+#### Nice plot of fDOM at 2 depths and waterlevel ----
+catwalk <- read.csv("https://pasta.lternet.edu/package/data/eml/edi/1069/4/42e6d8bb3d379d40a4a4fb566d4ff36e" )
+
+p <- -0.01
+
+catwalk_daily <- catwalk |>
+  mutate(fdom1_TC = EXOfDOM_QSU_1/(1 + (p*(EXOTemp_C_1 - 20)) ) ,
+         fdom9_TC = EXOfDOM_QSU_9/(1 + (p*(EXOTemp_C_9 - 20)) )
+  ) |>
+  mutate(Date = as.Date(DateTime)) |>
+  group_by(Date) |>
+  summarise(
+    fDOM_1_QSU_daily     = mean(fdom1_TC,              na.rm = TRUE),
+    fDOM_9_QSU_daily     = mean(fdom9_TC,              na.rm = TRUE),
+     WL_daily       = mean(Modeled_Depth_m,           na.rm = TRUE))
+
+
+#water level and fDOM
+catwalk_daily |>
+  filter(Date < ymd("2025-01-01")) |>
+  select(Date, WL_daily, fDOM_1_QSU_daily) |>
+  pivot_longer(-1) |>
+  ggplot(aes(x = Date, y = value ))+
+  geom_point() +
+  facet_wrap(~name, scales = "free_y", ncol = 1)+
+  theme_bw() + theme(legend.position = "top")
+
+wl_aslo <- catwalk_daily |>
+  filter(Date < ymd("2025-01-01")) |>
+  select(Date, WL_daily) |>
+  ggplot(aes(x = Date, y = WL_daily ))+
+  geom_point() + labs(y = "Water Level (m)", x= element_blank())+
+  theme_bw()
+
+fdom_aslo <- catwalk_daily |>
+  filter(Date < ymd("2025-01-01")) |>
+  select(Date, fDOM_1_QSU_daily) |>
+  ggplot(aes(x = Date, y = fDOM_1_QSU_daily, col = 'darkred' ))+
+  geom_point() + labs(y = "fDOM 1.5m (QSU)", x= element_blank())+
+  theme_bw() + theme(legend.position = "none")
+
+library(patchwork)
+
+wl_aslo / fdom_aslo
+
+#just fDOMs
+catwalk_daily |>
   filter(Date >= ymd("2024-01-01")) |>
   select(Date, fDOM_1_QSU_daily, fDOM_9_QSU_daily) |>
   pivot_longer(-1) |>
