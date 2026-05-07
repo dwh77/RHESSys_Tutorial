@@ -23,7 +23,14 @@ library(lubridate)
 ar_df <- read_csv("./CCR_AR_Modeling/Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
   mutate(Date = as.Date(Date),
          RH_DOCload_10day = slider::slide_dbl(RH_streamflow_DOC_gm2day, mean,
-                                              .before = 10, .after = 0, .complete = F))
+                                              .before = 10, .after = 0, .complete = F),
+         RH_Q_7daymean = slider::slide_dbl(RH_Q_m3day , mean,
+                                              .before = 7, .after = 0, .complete = F),
+         RH_DOC_7daymean = slider::slide_dbl(RH_DOC_mgL , mean,
+                                           .before = 7, .after = 0, .complete = F),
+         Chla_7daymean = slider::slide_dbl(Chla_1_ugL_daily , mean,
+                                           .before = 7, .after = 0, .complete = F)
+         )
 
 # All 2024 calendar dates — fit_ar_model filters to those with observed target
 pred_dates_2024 <- ar_df |>
@@ -226,12 +233,33 @@ plot_ar_forecast <- function(model_obj, horizon,
 #' @param model_obj  List returned by fit_ar_model().
 #' @return Tibble with columns: horizon, model_id, RMSE.
 
-calc_rmse_by_horizon <- function(model_obj) {
-  model_obj$forecasts |>
-    filter(!is.na(prediction), !is.na(fDOM_obs)) |>
-    group_by(model_id, horizon) |>
-    summarise(RMSE = sqrt(mean((prediction - fDOM_obs)^2)), .groups = "drop")
+calc_rmse_by_horizon <- function(model_obj, by_season = FALSE) {
+
+  df <- model_obj$forecasts |>
+    filter(!is.na(prediction), !is.na(fDOM_obs))
+
+  if (by_season) {
+    df <- df |>
+      mutate(
+        month  = month(forecast_date),
+        Season = case_when(
+          month %in% c(12, 1, 2)  ~ "Winter",
+          month %in% c(3,  4, 5)  ~ "Spring",
+          month %in% c(6,  7, 8)  ~ "Summer",
+          month %in% c(9, 10, 11) ~ "Fall"
+        )
+      )
+    df |>
+      group_by(model_id, horizon, Season) |>
+      summarise(RMSE = sqrt(mean((prediction - fDOM_obs)^2)), .groups = "drop")
+  } else {
+    df |>
+      group_by(model_id, horizon) |>
+      summarise(RMSE = sqrt(mean((prediction - fDOM_obs)^2)), .groups = "drop")
+  }
 }
+
+
 
 
 #### 5. Example usage ----
@@ -276,6 +304,16 @@ m2b_1m <- fit_ar_model(
 
 m2b_1m$model
 
+## Lake - Temp, DO, Chla7day
+m2c_1m <- fit_ar_model(
+  all_data   = ar_df,
+  pred_dates = pred_dates_2024,
+  target     = "fDOM_1_QSU_daily",
+  lag_col    = "fDOM_1m_lag1",
+  covariates = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_7daymean"),
+  model_name = "M2_1m_lag_LAKEc"
+)
+
 
 ## Lake (Temp, DO, SW) + Catchment (Q, DOC)
 m4_1m <- fit_ar_model(
@@ -307,6 +345,16 @@ m5_1m <- fit_ar_model(
   lag_col    = "fDOM_1m_lag1",
   covariates = c("RH_Q_m3day", "RH_DOC_mgL"),
   model_name = "M5_1m_lag_RH"
+)
+
+##  Catchment (Q, DOC) 7 day means
+m5b_1m <- fit_ar_model(
+  all_data   = ar_df,
+  pred_dates = pred_dates_2024,
+  target     = "fDOM_1_QSU_daily",
+  lag_col    = "fDOM_1m_lag1",
+  covariates = c("RH_Q_7daymean", "RH_DOC_7daymean"),
+  model_name = "M5_1m_lag_RHlag"
 )
 
 ## Lake (Temp, DO, SW) + Rain
@@ -382,7 +430,8 @@ plot_ar_forecast(m4_1m, horizon = 7)
 
 
 # --- RMSE by horizon: single model ---
-zz <- calc_rmse_by_horizon(m2_1m)
+calc_rmse_by_horizon(m2_1m)                  # original behaviour
+calc_rmse_by_horizon(m2_1m, by_season = TRUE) # seasonal breakdown
 
 
 # --- RMSE by horizon: compare multiple models ---
@@ -397,14 +446,69 @@ rmse_all <- bind_rows(
 # new models
 rmse_all <- bind_rows(
   calc_rmse_by_horizon(m1_1m),
-  calc_rmse_by_horizon(m2_1m),
-  calc_rmse_by_horizon(m4_1m),
-  calc_rmse_by_horizon(m6_1m)
+  # # calc_rmse_by_horizon(m2_1m),
+  # calc_rmse_by_horizon(m2b_1m),
+  # calc_rmse_by_horizon(m2c_1m),
+  # #calc_rmse_by_horizon(m4_1m),
+  # calc_rmse_by_horizon(m4b_1m),
+  # calc_rmse_by_horizon(m5_1m),
+  # calc_rmse_by_horizon(m5b_1m),
+  # #calc_rmse_by_horizon(m6_1m),
+  calc_rmse_by_horizon(m6b_1m),
+  calc_rmse_by_horizon(m7_1m)
 )
 
+# new models
+rmse_all_season <- bind_rows(
+  calc_rmse_by_horizon(m1_1m, by_season = TRUE),
+  calc_rmse_by_horizon(m2_1m, by_season = TRUE),
+  calc_rmse_by_horizon(m2b_1m, by_season = TRUE),
+  calc_rmse_by_horizon(m2c_1m, by_season = TRUE),
+  calc_rmse_by_horizon(m4_1m, by_season = TRUE),
+  calc_rmse_by_horizon(m4b_1m, by_season = TRUE),
+  calc_rmse_by_horizon(m5_1m, by_season = TRUE),
+  calc_rmse_by_horizon(m5b_1m, by_season = TRUE),
+  calc_rmse_by_horizon(m6_1m, by_season = TRUE),
+  calc_rmse_by_horizon(m6b_1m, by_season = TRUE),
+  calc_rmse_by_horizon(m7_1m, by_season = TRUE)
+)
+
+### RMSE plot across full sampling
 ggplot(rmse_all, aes(x = horizon, y = RMSE, col = model_id)) +
   geom_line(linewidth = 0.7) +
   geom_point(size = 1.4) +
   labs(title = "Prediction skill by horizon",
        x = "Forecast horizon (days ahead)", y = "RMSE (QSU)") +
   theme_bw() + theme(legend.position = "top", text = element_text(size = 14))
+
+### RMSE plot across full sampling by season
+ggplot(rmse_all_season, aes(x = horizon, y = RMSE, col = model_id)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.4) +
+  facet_wrap(~Season, nrow = 1)+
+  labs(title = "Prediction skill by horizon",
+       x = "Forecast horizon (days ahead)", y = "RMSE (QSU)") +
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 14))
+
+
+
+#### Bring results together and make plots across year
+# Collect all fitted model objects into a named list
+model_list <- list(m1_1m, m2_1m, m2b_1m, m2c_1m,
+                   m4_1m, m4b_1m, m5_1m, m5b_1m,
+                   m6_1m, m6b_1m, m7_1m)
+
+# Bind all forecast outputs into one data frame
+all_forecasts_obs <- map_dfr(model_list, \(m) m$forecasts)
+
+unique(all_forecasts_obs$model_id)
+
+# Now works with existing plots, e.g.:
+all_forecasts_obs |>
+  filter(horizon %in% c(1, 7, 15, 30),
+         model_id == "M5_1m_lag_RH") |>
+  ggplot() +
+  geom_line(aes(x = forecast_date, y = prediction, col = as.factor(horizon)), size = 1.1) +
+  geom_point(aes(x = forecast_date, y = fDOM_obs), size = 0.8) +
+  labs(x = "Date", y = "fDOM (QSU)", col = "Model Horizon") +
+  theme_bw() + theme(legend.position = "top")
