@@ -1,0 +1,803 @@
+---
+title: "AR Model Forecasting — fDOM 1m (30-day ahead)"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    theme: flatly
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 10,
+  fig.height = 5
+)
+```
+
+This document fits a suite of AR (autoregressive) GLMs to predict fDOM at 1m depth,
+generates iterative 30-day ahead forecasts for all of 2024, and evaluates skill by
+forecast horizon and season.
+
+Each model is defined by a target variable, a lag column, and optional covariates.
+All model fitting, forecasting, plotting, and RMSE calculation is handled by four
+reusable functions defined in the **Function Definitions** section below.
+
+**Forecasting approach** (following Lofton et al.): observed covariates are used at
+each forecast timestep; the lag term is updated iteratively from the prior day's
+prediction rather than from observed values.
+
+---
+
+## Packages and Data
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+```
+
+```{r load-data}
+ar_df <- read_csv("./CCR_AR_Modeling/Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
+  mutate(
+    Date = as.Date(Date),
+    RH_DOCload_10day = slider::slide_dbl(RH_streamflow_DOC_gm2day, mean,
+                                         .before = 10, .after = 0, .complete = F),
+    RH_Q_7daymean   = slider::slide_dbl(RH_Q_m3day,   mean,
+                                         .before = 7,  .after = 0, .complete = F),
+    RH_DOC_7daymean = slider::slide_dbl(RH_DOC_mgL,   mean,
+                                         .before = 7,  .after = 0, .complete = F),
+    Chla_7daymean   = slider::slide_dbl(Chla_1_ugL_daily, mean,
+                                         .before = 7,  .after = 0, .complete = F)
+  )
+
+# All 2024 calendar dates — fit_ar_model filters to those with observed target
+pred_dates_2024 <- ar_df |>
+  filter(Date >= ymd("2024-01-01"), Date < ymd("2025-01-01")) |>
+  pull(Date)
+```
+
+---
+
+## Function Definitions
+
+### Internal: iterative forecast engine
+
+Called inside `fit_ar_model()`; not usually used directly. Steps forward one day at
+a time, using the prior day's prediction as the lag and observed covariate values
+for each forecast date.
+
+```{r fn-forecast-engine}
+forecast_ar_gen <- function(ref_date, model, model_name, horizon = 30,
+                             all_data, target, lag_col, covar_cols = NULL) {
+
+  obs_ref <- all_data |> filter(Date == ref_date) |> pull(!!sym(target))
+  if (length(obs_ref) == 0 || is.na(obs_ref)) return(NULL)
+
+  prev_pred <- obs_ref
+  results   <- vector("list", horizon)
+
+  for (h in seq_len(horizon)) {
+    forecast_date <- ref_date + h
+    fc_row <- all_data |> filter(Date == forecast_date)
+    if (nrow(fc_row) == 0) next
+
+    newdata <- setNames(data.frame(prev_pred), lag_col)
+    if (!is.null(covar_cols)) {
+      for (cv in covar_cols) newdata[[cv]] <- fc_row[[cv]]
+    }
+
+    pred_val <- as.numeric(predict(model, newdata = newdata))
+
+    results[[h]] <- tibble(
+      model_id       = model_name,
+      reference_date = ref_date,
+      forecast_date  = forecast_date,
+      horizon        = h,
+      prediction     = pred_val
+    )
+    prev_pred <- pred_val
+  }
+
+  bind_rows(results)
+}
+```
+
+### Main wrapper: `fit_ar_model()`
+
+Fits a GLM, runs iterative 30-day forecasts for all valid 2024 reference dates,
+and returns a named list containing the model, training data with fitted values,
+and forecast output with observed values joined.
+
+```{r fn-fit-model}
+fit_ar_model <- function(all_data,
+                          train_cutoff = ymd("2024-01-01"),
+                          pred_dates,
+                          target,
+                          lag_col,
+                          covariates = NULL,
+                          model_name,
+                          horizon = 30) {
+
+  # Build training data: filter to pre-cutoff, drop NAs in all model variables
+  train_df <- all_data |>
+    filter(Date < train_cutoff,
+           !is.na(!!sym(target)),
+           !is.na(!!sym(lag_col)))
+
+  if (!is.null(covariates)) {
+    for (cv in covariates) train_df <- train_df |> filter(!is.na(!!sym(cv)))
+  }
+
+  # Build formula and fit GLM
+  rhs     <- paste(c(lag_col, covariates), collapse = " + ")
+  formula <- as.formula(paste(target, "~", rhs))
+  mod     <- glm(formula, data = train_df, family = gaussian, na.action = na.fail)
+  print(summary(mod))
+
+  # Add in-sample fitted values to training data
+  train_fitted <- train_df |> mutate(fitted = predict(mod, newdata = train_df))
+
+  # Filter pred_dates to rows with observed target (needed to seed the lag)
+  valid_pred_dates <- all_data |>
+    filter(Date %in% pred_dates, !is.na(!!sym(target))) |>
+    pull(Date)
+
+  message(model_name, " | n_train = ", nrow(train_df),
+          " | n_ref_dates = ", length(valid_pred_dates))
+
+  # Run iterative forecasts
+  forecasts <- map_dfr(valid_pred_dates, \(d) forecast_ar_gen(
+    ref_date   = d, model = mod, model_name = model_name,
+    horizon    = horizon, all_data = all_data,
+    target     = target, lag_col = lag_col, covar_cols = covariates
+  ))
+
+  # Join observed target onto forecasts by forecast_date
+  forecasts_obs <- forecasts |>
+    left_join(all_data |> select(Date, fDOM_obs = !!sym(target)),
+              by = c("forecast_date" = "Date"))
+
+  list(model      = mod,      model_name = model_name,
+       target     = target,   lag_col    = lag_col,
+       covariates = covariates,
+       train_data = train_fitted,
+       forecasts  = forecasts_obs)
+}
+```
+
+### Plot: `plot_ar_forecast()`
+
+Produces a single timeseries showing observed (black), training fit (orange), and
+test-period predictions (blue) for a chosen forecast horizon.
+
+```{r fn-plot}
+plot_ar_forecast <- function(model_obj, horizon,
+                              train_cutoff = as.Date("2024-01-01")) {
+
+  target     <- model_obj$target
+  model_name <- model_obj$model_name
+  df_train   <- model_obj$train_data
+  df_test    <- model_obj$forecasts |> filter(horizon == !!horizon)
+
+  obs_data <- bind_rows(
+    df_train |> select(Date, fDOM = !!sym(target)),
+    df_test  |> select(Date = forecast_date, fDOM = fDOM_obs)
+  ) |> filter(!is.na(fDOM)) |> mutate(series = "Observed")
+
+  train_fit <- df_train |>
+    filter(!is.na(fitted)) |>
+    select(Date, fDOM = fitted) |>
+    mutate(series = "Training fit")
+
+  test_pred <- df_test |>
+    filter(!is.na(prediction)) |>
+    select(Date = forecast_date, fDOM = prediction) |>
+    mutate(series = "Test prediction")
+
+  bind_rows(obs_data, train_fit, test_pred) |>
+    ggplot(aes(x = Date, y = fDOM, color = series)) +
+    geom_point(size = 1.2, alpha = 0.8) +
+    geom_vline(xintercept = train_cutoff, linetype = "dashed", color = "gray40") +
+    scale_color_manual(
+      values = c("Observed" = "black", "Training fit" = "orange",
+                 "Test prediction" = "dodgerblue"),
+      breaks = c("Observed", "Training fit", "Test prediction")
+    ) +
+    labs(title = paste0(model_name, "  |  horizon = ", horizon, " day(s)"),
+         x = "Date", y = "fDOM (QSU)", color = NULL) +
+    theme_bw() + theme(legend.position = "top")
+}
+```
+
+### RMSE: `calc_rmse_by_horizon()`
+
+Returns RMSE at each forecast horizon. Set `by_season = TRUE` to additionally
+group by season (Winter / Spring / Summer / Fall).
+
+```{r fn-rmse}
+calc_rmse_by_horizon <- function(model_obj, by_season = FALSE) {
+
+  df <- model_obj$forecasts |>
+    filter(!is.na(prediction), !is.na(fDOM_obs))
+
+  if (by_season) {
+    df <- df |>
+      mutate(
+        month  = month(forecast_date),
+        Season = case_when(
+          month %in% c(12, 1, 2)  ~ "Winter",
+          month %in% c(3,  4, 5)  ~ "Spring",
+          month %in% c(6,  7, 8)  ~ "Summer",
+          month %in% c(9, 10, 11) ~ "Fall"
+        )
+      )
+    df |>
+      group_by(model_id, horizon, Season) |>
+      summarise(RMSE = sqrt(mean((prediction - fDOM_obs)^2)), .groups = "drop")
+  } else {
+    df |>
+      group_by(model_id, horizon) |>
+      summarise(RMSE = sqrt(mean((prediction - fDOM_obs)^2)), .groups = "drop")
+  }
+}
+```
+
+---
+
+## Run Models
+
+Models are grouped by covariate set. All use `fDOM_1m_lag1` as the lag predictor
+and `fDOM_1_QSU_daily` as the target. Summaries print to confirm coefficient
+estimates and significance.
+
+```{r run-lag-only, results='hide'}
+## M1 — lag only
+m1_1m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_1_QSU_daily", lag_col = "fDOM_1m_lag1",
+  covariates = NULL, model_name = "M1_1m_lag"
+)
+
+m1_9m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_9_QSU_daily", lag_col = "fDOM_9m_lag1",
+  covariates = NULL, model_name = "M1_9m_lag"
+)
+
+```
+
+```{r run-lake-models, results='hide'}
+## M2a — lag + Temp + DO + SW
+m2_1m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_1_QSU_daily", lag_col = "fDOM_1m_lag1",
+  covariates = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily"),
+  model_name = "M2_1m_lag_LAKEa"
+)
+
+## M2b — lag + Temp + DO
+m2b_1m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_1_QSU_daily", lag_col = "fDOM_1m_lag1",
+  covariates = c("Temp_1_C_daily", "DOsat_1_pct_daily"),
+  model_name = "M2_1m_lag_LAKEb"
+)
+
+m2b_9m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_9_QSU_daily", lag_col = "fDOM_9m_lag1",
+  covariates = c("Temp_9_C_daily", "DOsat_9_pct_daily"),
+  model_name = "M2_9m_lag_LAKEb"
+)
+
+## M2c — lag + Temp + DO + Chla 7-day mean
+m2c_1m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_1_QSU_daily", lag_col = "fDOM_1m_lag1",
+  covariates = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_7daymean"),
+  model_name = "M2_1m_lag_LAKEc"
+)
+```
+
+```{r run-catchment-models, results='hide'}
+## M4a — lag + Temp + DO + SW + RH Q + RH DOC
+m4_1m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_1_QSU_daily", lag_col = "fDOM_1m_lag1",
+  covariates = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+                 "RH_Q_m3day", "RH_DOC_mgL"),
+  model_name = "M4_1m_lag_LAKEa_RH"
+)
+
+## M4b — lag + Temp + DO + RH Q + RH DOC
+m4b_1m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_1_QSU_daily", lag_col = "fDOM_1m_lag1",
+  covariates = c("Temp_1_C_daily", "DOsat_1_pct_daily",
+                 "RH_Q_m3day", "RH_DOC_mgL"),
+  model_name = "M4_1m_lag_LAKEb_RH"
+)
+
+m4b_9m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_9_QSU_daily", lag_col = "fDOM_9m_lag1",
+  covariates = c("Temp_9_C_daily", "DOsat_9_pct_daily",
+                 "RH_Q_m3day", "RH_DOC_mgL"),
+  model_name = "M4_9m_lag_LAKEb_RH"
+)
+
+
+## M5a — lag + RH Q + RH DOC (daily)
+m5_1m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_1_QSU_daily", lag_col = "fDOM_1m_lag1",
+  covariates = c("RH_Q_m3day", "RH_DOC_mgL"),
+  model_name = "M5_1m_lag_RH"
+)
+
+## M5a — lag + RH Q + RH DOC (daily)
+m5_9m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_9_QSU_daily", lag_col = "fDOM_9m_lag1",
+  covariates = c("RH_Q_m3day", "RH_DOC_mgL"),
+  model_name = "M5_9m_lag_RH"
+)
+
+## M5b — lag + RH Q + RH DOC (7-day means)
+m5b_1m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_1_QSU_daily", lag_col = "fDOM_1m_lag1",
+  covariates = c("RH_Q_7daymean", "RH_DOC_7daymean"),
+  model_name = "M5_1m_lag_RHlag"
+)
+```
+
+```{r run-rain-models, results='hide'}
+## M6a — lag + Temp + DO + SW + Rain lag1
+m6_1m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_1_QSU_daily", lag_col = "fDOM_1m_lag1",
+  covariates = c("Temp_1_C_daily", "DOsat_1_pct_daily", "SW_Wm2_daily",
+                 "Rain_mm_lag1"),
+  model_name = "M6_1m_lag_Lakea_Rain"
+)
+
+## M6b — lag + Temp + DO + Rain lag1
+m6b_1m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_1_QSU_daily", lag_col = "fDOM_1m_lag1",
+  covariates = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Rain_mm_lag1"),
+  model_name = "M6_1m_lag_Lakeb_Rain"
+)
+
+## M7 — lag + Rain lag1 only
+m7_1m <- fit_ar_model(
+  all_data = ar_df, pred_dates = pred_dates_2024,
+  target = "fDOM_1_QSU_daily", lag_col = "fDOM_1m_lag1",
+  covariates = c("Rain_mm_lag1"),
+  model_name = "M7_1m_lag_Rain"
+)
+```
+
+---
+
+## Collect Outputs and Timeseries Plots
+
+### Combine all forecasts
+
+```{r collect-forecasts}
+model_list <- list(m1_1m, m2b_1m, #m2_1m, m2c_1m, m4_1m, m6_1m, m5b_1m # SW or chla
+                   m4b_1m, m5_1m #, m6b_1m, m7_1m #Rains
+                   )
+
+all_forecasts_obs <- map_dfr(model_list, \(m) m$forecasts)
+
+unique(all_forecasts_obs$model_id)
+```
+
+### Training vs test plots
+
+Black points = observed. Orange = in-sample training fit. Blue = out-of-sample
+test prediction at the chosen horizon.
+
+```{r train-test-plots}
+plot_ar_forecast(m1_1m, horizon = 1)
+plot_ar_forecast(m1_1m, horizon = 30)
+plot_ar_forecast(m2_1m, horizon = 7)
+plot_ar_forecast(m4_1m, horizon = 7)
+```
+
+### Multi-horizon timeseries (one model)
+
+```{r ts-multi-horizon}
+all_forecasts_obs |>
+  filter(horizon %in% c(1, 7, 15, 30),
+         model_id == "M5_1m_lag_RH") |>
+  ggplot() +
+  geom_line(aes(x = forecast_date, y = prediction,
+                col = as.factor(horizon)), linewidth = 1.1) +
+  geom_point(aes(x = forecast_date, y = fDOM_obs), size = 0.8) +
+  labs(x = "Date", y = "fDOM (QSU)", col = "Horizon (days)",
+       title = "M5_1m_lag_RH — predictions by horizon") +
+  theme_bw() + theme(legend.position = "top")
+```
+
+### Multi-model timeseries (one horizon)
+
+```{r ts-multi-model}
+all_forecasts_obs |>
+  filter(horizon == 7,
+         model_id %in% c("M1_1m_lag", "M2_1m_lag_LAKEa",
+                          "M4_1m_lag_LAKEa_RH", "M6_1m_lag_Lakeb_Rain")) |>
+  ggplot() +
+  geom_line(aes(x = forecast_date, y = prediction,
+                col = model_id), linewidth = 1.1) +
+  geom_point(aes(x = forecast_date, y = fDOM_obs), size = 0.8) +
+  labs(x = "Date", y = "fDOM (QSU)", col = "Model",
+       title = "7-day ahead forecast — all models") +
+  theme_bw() + theme(legend.position = "top")
+```
+
+---
+
+## RMSE Calculations
+
+### Overall RMSE by horizon
+
+```{r rmse-overall}
+# Shared label map — used in all RMSE chunks and the example forecast
+model_labels <- c(
+  "M1_1m_lag"          = "AR only",
+  "M2_1m_lag_LAKEb"    = "AR + in-lake",
+  "M4_1m_lag_LAKEb_RH" = "AR + in-lake + catchment",
+  "M5_1m_lag_RH"       = "AR + catchment"
+)
+models_keep <- names(model_labels)
+
+rmse_all <- bind_rows(
+  calc_rmse_by_horizon(m1_1m),
+  calc_rmse_by_horizon(m2b_1m),
+  calc_rmse_by_horizon(m4b_1m),
+  calc_rmse_by_horizon(m5_1m)
+) |>
+  mutate(model_id = recode(model_id, !!!model_labels))
+
+ggplot(rmse_all, aes(x = horizon, y = RMSE, col = model_id)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.4) +
+  labs(#title = "Prediction skill by horizon",
+       x = "Forecast horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 24))
+```
+
+### Seasonal RMSE by horizon
+
+```{r rmse-seasonal}
+rmse_all_season <- bind_rows(
+  calc_rmse_by_horizon(m1_1m,  by_season = TRUE),
+  calc_rmse_by_horizon(m2b_1m, by_season = TRUE),
+  calc_rmse_by_horizon(m4b_1m, by_season = TRUE),
+  calc_rmse_by_horizon(m5_1m,  by_season = TRUE)
+) |>
+  mutate(model_id = recode(model_id, !!!model_labels))
+
+ggplot(rmse_all_season, aes(x = horizon, y = RMSE, col = model_id)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.4) +
+  facet_wrap(~Season, nrow = 1) +
+  labs(title = "Prediction skill by horizon and season",
+       x = "Forecast horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 14))
+```
+
+## 9m RMSEs
+
+```{r}
+# Shared label map — used in all RMSE chunks and the example forecast
+model_labels <- c(
+  "M1_9m_lag"          = "AR only",
+  "M2_9m_lag_LAKEb"    = "AR + in-lake",
+  "M4_9m_lag_LAKEb_RH" = "AR + in-lake + catchment",
+  "M5_9m_lag_RH"       = "AR + catchment"
+)
+
+models_keep <- names(model_labels)
+
+rmse_all9m <- bind_rows(
+  calc_rmse_by_horizon(m1_9m),
+  calc_rmse_by_horizon(m2b_9m),
+  calc_rmse_by_horizon(m4b_9m),
+  calc_rmse_by_horizon(m5_9m)
+) |>
+  mutate(model_id = recode(model_id, !!!model_labels))
+
+ggplot(rmse_all9m, aes(x = horizon, y = RMSE, col = model_id)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.4) +
+  labs(title = "Prediction skill by horizon",
+       x = "Forecast horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 14))
+
+
+
+##season
+rmse_all_season9m <- bind_rows(
+  calc_rmse_by_horizon(m1_9m,  by_season = TRUE),
+  calc_rmse_by_horizon(m2b_9m, by_season = TRUE),
+  calc_rmse_by_horizon(m4b_9m, by_season = TRUE),
+  calc_rmse_by_horizon(m5_9m,  by_season = TRUE)
+) |>
+  mutate(model_id = recode(model_id, !!!model_labels))
+
+ggplot(rmse_all_season9m, aes(x = horizon, y = RMSE, col = model_id)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.4) +
+  facet_wrap(~Season, nrow = 1) +
+  labs(title = "Prediction skill by horizon and season",
+       x = "Forecast horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 14))
+
+
+
+```
+
+
+## RMSE by Discharge Condition
+
+Reference dates are split into low-flow (5th–15th percentile of 2024 discharge) and
+high-flow (85th–95th percentile) groups. Each band captures roughly 10% of 2024 reference
+dates (~30 days), providing a balanced comparison of forecast skill under contrasting
+hydrological conditions.
+
+```{r rmse-flow-thresholds}
+# Compute percentile thresholds from the 2024 reference date discharge distribution
+q_2024 <- all_forecasts_obs |>
+  distinct(reference_date) |>
+  left_join(ar_df |> select(Date, RH_Q_m3day), by = c("reference_date" = "Date"))
+
+thresholds <- quantile(q_2024$RH_Q_m3day, probs = c(0.05, 0.15, 0.85, 0.95), na.rm = TRUE)
+
+low_dates  <- q_2024 |> filter(RH_Q_m3day >= thresholds[1], RH_Q_m3day <= thresholds[2]) |> pull(reference_date)
+high_dates <- q_2024 |> filter(RH_Q_m3day >= thresholds[3], RH_Q_m3day <= thresholds[4]) |> pull(reference_date)
+
+print(low_dates)
+print(high_dates)
+
+
+# message("Low-flow reference dates (5th–15th pct):  n = ", length(low_dates),
+#         "  |  Q range: ", round(thresholds[1], 2), "–", round(thresholds[2], 2), " m3/day")
+# message("High-flow reference dates (85th–95th pct): n = ", length(high_dates),
+#         "  |  Q range: ", round(thresholds[3], 2), "–", round(thresholds[4], 2), " m3/day")
+
+```
+
+```{r rmse-flow-calc}
+# RMSE by horizon for each flow condition
+calc_rmse_flow <- function(forecasts_df, ref_dates, flow_label) {
+  forecasts_df |>
+    filter(model_id %in% models_keep,
+           reference_date %in% ref_dates,
+           !is.na(prediction), !is.na(fDOM_obs)) |>
+    group_by(model_id, horizon) |>
+    summarise(RMSE = sqrt(mean((prediction - fDOM_obs)^2)), .groups = "drop") |>
+    mutate(flow_condition = flow_label,
+           model_id = recode(model_id, !!!model_labels))
+}
+
+rmse_low  <- calc_rmse_flow(all_forecasts_obs, low_dates,  "Low flow (5th–15th pct)")
+rmse_high <- calc_rmse_flow(all_forecasts_obs, high_dates, "High flow (85th–95th pct)")
+
+rmse_flow <- bind_rows(rmse_low, rmse_high)
+
+
+### plot
+ggplot(rmse_flow, aes(x = horizon, y = RMSE, col = model_id)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.4) +
+  facet_wrap(~flow_condition, nrow = 1) +
+  labs(
+    title = "Prediction skill by horizon — low vs. high discharge conditions",
+    x     = "Forecast horizon (days ahead)",
+    y     = "RMSE (QSU)",
+    col   = NULL
+  ) +
+  theme_bw() +
+  theme(legend.position = "top", text = element_text(size = 14))
+```
+
+---
+
+### Wettest vs. driest month
+
+Identify which 2024 calendar month had the highest and lowest mean discharge across
+reference dates, then compute RMSE by horizon for forecasts issued in each of those months.
+
+```{r rmse-monthly-flow}
+# Mean discharge by calendar month across 2024 reference dates
+monthly_q <- q_2024 |>
+  mutate(month = month(reference_date, label = TRUE, abbr = FALSE)) |>
+  group_by(month) |>
+  summarise(mean_Q = mean(RH_Q_m3day, na.rm = TRUE), .groups = "drop") |>
+  arrange(mean_Q)
+
+wettest_month <- monthly_q |> slice_max(mean_Q, n = 1) |> pull(month)
+driest_month  <- monthly_q |> slice_min(mean_Q, n = 1) |> pull(month)
+
+message("Wettest month: ", wettest_month,
+        "  |  mean Q = ", round(monthly_q$mean_Q[monthly_q$month == wettest_month], 2), " m3/day")
+message("Driest month:  ", driest_month,
+        "  |  mean Q = ", round(monthly_q$mean_Q[monthly_q$month == driest_month], 2), " m3/day")
+
+wet_dates <- q_2024 |>
+  mutate(month = month(reference_date, label = TRUE, abbr = FALSE)) |>
+  filter(month == wettest_month) |>
+  pull(reference_date)
+
+dry_dates <- q_2024 |>
+  mutate(month = month(reference_date, label = TRUE, abbr = FALSE)) |>
+  filter(month == driest_month) |>
+  pull(reference_date)
+
+rmse_wet <- calc_rmse_flow(all_forecasts_obs, wet_dates,
+                            paste0("Wettest month (", wettest_month, ")"))
+rmse_dry <- calc_rmse_flow(all_forecasts_obs, dry_dates,
+                            paste0("Driest month (", driest_month, ")"))
+
+rmse_monthly_flow <- bind_rows(rmse_wet, rmse_dry)
+```
+
+```{r rmse-monthly-flow-plot, fig.height = 6}
+ggplot(rmse_monthly_flow, aes(x = horizon, y = RMSE, col = model_id)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.4) +
+  facet_wrap(~flow_condition, nrow = 1) +
+  labs(
+    title = "Prediction skill by horizon — wettest vs. driest month",
+    x     = "Forecast horizon (days ahead)",
+    y     = "RMSE (QSU)",
+    col   = NULL
+  ) +
+  theme_bw() +
+  theme(legend.position = "top", text = element_text(size = 14))
+```
+
+---
+
+## Model Skill Relative to Persistence
+
+Skill scores express improvement over the "AR only" model (treated as persistence here).
+A skill of 0 means no improvement; positive values indicate better-than-persistence skill;
+negative values indicate worse performance. Calculated as:
+
+**Skill = 1 − (model RMSE / AR-only RMSE)**
+
+```{r skill-calc}
+skill_rmse <- all_forecasts_obs |>
+  filter(model_id %in% models_keep,
+         !is.na(prediction), !is.na(fDOM_obs)) |>
+  mutate(model_id = recode(model_id, !!!model_labels)) |>
+  mutate(month  = month(forecast_date),
+        Season = case_when(
+          month %in% c(12, 1, 2)  ~ "Winter",
+          month %in% c(3,  4, 5)  ~ "Spring",
+          month %in% c(6,  7, 8)  ~ "Summer",
+          month %in% c(9, 10, 11) ~ "Fall")) |> 
+  group_by(model_id, horizon, Season) |>
+  summarise(RMSE = sqrt(mean((prediction - fDOM_obs)^2)), .groups = "drop") |>
+  pivot_wider(names_from = model_id, values_from = RMSE) |>
+  mutate(
+    `AR + in-lake`             = 1 - (`AR + in-lake`             / `AR only`),
+    `AR + catchment`           = 1 - (`AR + catchment`           / `AR only`),
+    `AR + in-lake + catchment` = 1 - (`AR + in-lake + catchment` / `AR only`)
+  ) |>
+  # select(horizon, `AR + in-lake`, `AR + catchment`, `AR + in-lake + catchment`) |>
+  # pivot_longer(-horizon, names_to = "model_id", values_to = "skill")
+    select(Season, horizon, `AR + in-lake`, `AR + catchment`, `AR + in-lake + catchment`) |>
+  pivot_longer(-c(Season, horizon), names_to = "model_id", values_to = "skill")
+```
+
+```{r skill-plot}
+ggplot(skill_rmse, aes(x = horizon, y = skill, col = model_id)) +
+  geom_hline(yintercept = 0, linewidth = 1, linetype = "dashed", color = "gray40") +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.4) +
+  facet_wrap(~Season, nrow = 1)+
+  scale_color_manual(values = c(
+    "AR + in-lake"             = "#00BA38",
+    "AR + in-lake + catchment" = "#619CFF",
+    "AR + catchment"           = "#F8766D"
+  )) +
+  labs(
+    #title = "Forecast skill relative to AR-only (persistence)",
+    x     = "Forecast horizon (days ahead)",
+    y     = "Skill score",
+    col   = NULL
+  ) +
+  theme_bw() +
+  theme(legend.position = "top", text = element_text(size = 20))
+
+```
+
+---
+
+## Example Forecast for Talk
+
+Three-panel build showing a 30-day forecast issued on 2024-09-01. Each panel adds
+a layer: (1) pre-forecast observations only, (2) model predictions, (3) observed
+values during the forecast horizon to evaluate skill.
+
+```{r talk-forecast-data}
+ref_date <- as.Date("2024-09-01")
+
+# 3 observations before ref_date + the ref_date itself (seeds the forecast)
+pre_obs <- ar_df |>
+  filter(Date >= ref_date - 3, Date <= ref_date) |>
+  select(Date, fDOM = fDOM_1_QSU_daily) |>
+  filter(!is.na(fDOM))
+
+# Observed fDOM during the 30-day forecast window
+post_obs <- ar_df |>
+  filter(Date > ref_date, Date <= ref_date + 30) |>
+  select(Date, fDOM = fDOM_1_QSU_daily) |>
+  filter(!is.na(fDOM))
+
+# Model predictions for this reference date — reuse shared label map
+talk_fc <- all_forecasts_obs |>
+  filter(reference_date == ref_date, model_id %in% models_keep) |>
+  select(Date = forecast_date, fDOM = prediction, model_id) |>
+  filter(!is.na(fDOM)) |>
+  mutate(model_id = recode(model_id, !!!model_labels))
+```
+
+```{r talk-forecast-plots, fig.width = 6, fig.height = 5}
+x_lim        <- c(ref_date - 3, ref_date + 30)
+y_lim        <- c(2, 20)
+model_colors <- c("AR only"                  = "#F8766D",
+                  "AR + in-lake"             = "#00BA38",
+                  "AR + in-lake + catchment" = "#619CFF",
+                  "AR + catchment"           = "#C77CFF")
+
+base_layers <- list(
+  geom_vline(xintercept = ref_date, linetype = "dashed", color = "gray40"),
+  scale_x_date(limits = x_lim, date_labels = "%b %d"),
+  scale_y_continuous(limits = y_lim),
+  labs(x = "Date", y = "fDOM (QSU)", color = "Model",
+       title = "Example forecast for talk"),
+  theme_bw(),
+  theme(legend.position = "top", text = element_text(size = 13))
+)
+
+# --- Panel 1: pre-forecast observations only ---
+ggplot() +
+  base_layers +
+  geom_point(data = pre_obs, aes(x = Date, y = fDOM),
+             color = "black", size = 2.5)
+
+# --- Panel 2: add model forecasts (all three models) ---
+ggplot() +
+  base_layers +
+  geom_point(data = pre_obs, aes(x = Date, y = fDOM),
+             color = "black", size = 2.5) +
+  geom_line(data  = talk_fc, aes(x = Date, y = fDOM, color = model_id),
+            linewidth = 0.8) +
+  geom_point(data = talk_fc, aes(x = Date, y = fDOM, color = model_id),
+             size = 1.8) +
+  scale_color_manual(values = model_colors)
+
+# --- Panel 3: add observed values during forecast period ---
+ggplot() +
+  base_layers +
+  geom_point(data = pre_obs,  aes(x = Date, y = fDOM),
+             color = "black", size = 2.5) +
+  geom_line(data  = talk_fc,  aes(x = Date, y = fDOM, color = model_id),
+            linewidth = 0.8) +
+  geom_point(data = talk_fc,  aes(x = Date, y = fDOM, color = model_id),
+             size = 1.8) +
+  geom_point(data = post_obs, aes(x = Date, y = fDOM),
+             color = "black", size = 2.5) +
+  scale_color_manual(values = model_colors)
+```
