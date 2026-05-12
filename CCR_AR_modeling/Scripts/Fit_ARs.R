@@ -31,7 +31,8 @@ catwalk_daily <- catwalk |>
 
 #water level and fDOM
 catwalk_daily |>
-  filter(Date < ymd("2025-01-01")) |>
+  filter(Date >= ymd("2024-01-01"),
+         Date < ymd("2025-01-01")) |>
   select(Date, WL_daily, fDOM_1_QSU_daily) |>
   pivot_longer(-1) |>
   ggplot(aes(x = Date, y = value ))+
@@ -40,17 +41,21 @@ catwalk_daily |>
   theme_bw() + theme(legend.position = "top")
 
 wl_aslo <- catwalk_daily |>
-  filter(Date < ymd("2025-01-01")) |>
+  filter(Date >= ymd("2024-01-01"),
+         Date < ymd("2025-01-01")) |>
   select(Date, WL_daily) |>
   ggplot(aes(x = Date, y = WL_daily ))+
   geom_point() + labs(y = "Water Level (m)", x= element_blank())+
   theme_bw()
 
 fdom_aslo <- catwalk_daily |>
-  filter(Date < ymd("2025-01-01")) |>
+  filter(Date >= ymd("2024-01-01"),
+         Date < ymd("2025-01-01")) |>
   select(Date, fDOM_1_QSU_daily) |>
   ggplot(aes(x = Date, y = fDOM_1_QSU_daily, col = 'darkred' ))+
-  geom_point() + labs(y = "fDOM 1.5m (QSU)", x= element_blank())+
+  geom_point() + labs(y = "fDOM 1.5m (QSU)", x= element_blank()#, title = "2024 fDOM 1.5m"
+                      )+
+  scale_x_date(breaks = "1 month", date_labels = "%b")+
   theme_bw() + theme(legend.position = "none")
 
 library(patchwork)

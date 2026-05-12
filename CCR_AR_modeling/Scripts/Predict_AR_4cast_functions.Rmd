@@ -41,7 +41,7 @@ library(lubridate)
 ```
 
 ```{r load-data}
-ar_df <- read_csv("./CCR_AR_Modeling/Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
+ar_df <- read_csv("../Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
   mutate(
     Date = as.Date(Date),
     RH_DOCload_10day = slider::slide_dbl(RH_streamflow_DOC_gm2day, mean,
@@ -58,6 +58,19 @@ ar_df <- read_csv("./CCR_AR_Modeling/Data/Daily_catwalk_met_RH_2021_2025_lagZS.c
 pred_dates_2024 <- ar_df |>
   filter(Date >= ymd("2024-01-01"), Date < ymd("2025-01-01")) |>
   pull(Date)
+
+
+##df for ccr 1.5m shap
+# ccr1m_shap <- ar_df |> 
+#   select(Date, fDOM_1_QSU_daily, fDOM_1m_lag1, 
+#          Temp_1_C_daily, DOsat_1_pct_daily, Chla_1_ugL_daily, SC_1_uScm_daily, 
+#          SW_Wm2_daily, Rain_mm_daily, Rain_mm_lag1, Rain_mm_lag2, 
+#          RH_Q_m3day, RH_DOC_mgL )
+# 
+# write.csv(ccr1m_shap, "C:/Users/dwh18/Downloads/ccr1m_fDOM_2021_2025.csv", row.names = F)
+
+
+
 ```
 
 ---
@@ -383,6 +396,18 @@ m7_1m <- fit_ar_model(
 )
 ```
 
+
+
+AIC
+Thing to check: that training data is same for all models (incase of weird NA missing a few for one co-var)
+```{r}
+
+AIC(m1_1m$model, m2b_1m$model, m4b_1m$model,  m5_1m$model)
+
+```
+
+
+
 ---
 
 ## Collect Outputs and Timeseries Plots
@@ -449,14 +474,24 @@ all_forecasts_obs |>
 ### Overall RMSE by horizon
 
 ```{r rmse-overall}
-# Shared label map — used in all RMSE chunks and the example forecast
-model_labels <- c(
+# Shared label map (1m) — used in RMSE chunks, flow chunks, and example forecast
+model_labels_1m <- c(
   "M1_1m_lag"          = "AR only",
   "M2_1m_lag_LAKEb"    = "AR + in-lake",
   "M4_1m_lag_LAKEb_RH" = "AR + in-lake + catchment",
   "M5_1m_lag_RH"       = "AR + catchment"
 )
-models_keep <- names(model_labels)
+model_labels <- model_labels_1m          # active map (reset before flow chunks)
+models_keep  <- names(model_labels)
+
+# Shared color palette and legend factor order — used in every model_id plot
+model_colors <- c(
+  "AR only"                  = "#C77CFF",
+  "AR + in-lake"             = "#00BA38",
+  "AR + catchment"           = "#F8766D",
+  "AR + in-lake + catchment" = "#619CFF"
+)
+model_levels <- names(model_colors)
 
 rmse_all <- bind_rows(
   calc_rmse_by_horizon(m1_1m),
@@ -464,14 +499,15 @@ rmse_all <- bind_rows(
   calc_rmse_by_horizon(m4b_1m),
   calc_rmse_by_horizon(m5_1m)
 ) |>
-  mutate(model_id = recode(model_id, !!!model_labels))
+  mutate(model_id = factor(recode(model_id, !!!model_labels), levels = model_levels))
 
 ggplot(rmse_all, aes(x = horizon, y = RMSE, col = model_id)) +
-  geom_line(linewidth = 0.7) +
-  geom_point(size = 1.4) +
-  labs(#title = "Prediction skill by horizon",
-       x = "Forecast horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.6) +
+  scale_color_manual(values = model_colors) +
+  labs(x = "Prediction horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
   theme_bw() + theme(legend.position = "top", text = element_text(size = 24))
+
 ```
 
 ### Seasonal RMSE by horizon
@@ -483,29 +519,28 @@ rmse_all_season <- bind_rows(
   calc_rmse_by_horizon(m4b_1m, by_season = TRUE),
   calc_rmse_by_horizon(m5_1m,  by_season = TRUE)
 ) |>
-  mutate(model_id = recode(model_id, !!!model_labels))
+  mutate(model_id = factor(recode(model_id, !!!model_labels), levels = model_levels))
 
 ggplot(rmse_all_season, aes(x = horizon, y = RMSE, col = model_id)) +
   geom_line(linewidth = 0.7) +
   geom_point(size = 1.4) +
   facet_wrap(~Season, nrow = 1) +
+  scale_color_manual(values = model_colors) +
   labs(title = "Prediction skill by horizon and season",
-       x = "Forecast horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
+       x = "Prediction horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
   theme_bw() + theme(legend.position = "top", text = element_text(size = 14))
 ```
 
 ## 9m RMSEs
 
 ```{r}
-# Shared label map — used in all RMSE chunks and the example forecast
-model_labels <- c(
+# 9m label map (friendly names identical to 1m; only raw IDs differ)
+model_labels_9m <- c(
   "M1_9m_lag"          = "AR only",
   "M2_9m_lag_LAKEb"    = "AR + in-lake",
   "M4_9m_lag_LAKEb_RH" = "AR + in-lake + catchment",
   "M5_9m_lag_RH"       = "AR + catchment"
 )
-
-models_keep <- names(model_labels)
 
 rmse_all9m <- bind_rows(
   calc_rmse_by_horizon(m1_9m),
@@ -513,16 +548,15 @@ rmse_all9m <- bind_rows(
   calc_rmse_by_horizon(m4b_9m),
   calc_rmse_by_horizon(m5_9m)
 ) |>
-  mutate(model_id = recode(model_id, !!!model_labels))
+  mutate(model_id = factor(recode(model_id, !!!model_labels_9m), levels = model_levels))
 
 ggplot(rmse_all9m, aes(x = horizon, y = RMSE, col = model_id)) +
   geom_line(linewidth = 0.7) +
   geom_point(size = 1.4) +
+  scale_color_manual(values = model_colors) +
   labs(title = "Prediction skill by horizon",
-       x = "Forecast horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
+       x = "Prediction horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
   theme_bw() + theme(legend.position = "top", text = element_text(size = 14))
-
-
 
 ##season
 rmse_all_season9m <- bind_rows(
@@ -531,14 +565,15 @@ rmse_all_season9m <- bind_rows(
   calc_rmse_by_horizon(m4b_9m, by_season = TRUE),
   calc_rmse_by_horizon(m5_9m,  by_season = TRUE)
 ) |>
-  mutate(model_id = recode(model_id, !!!model_labels))
+  mutate(model_id = factor(recode(model_id, !!!model_labels_9m), levels = model_levels))
 
 ggplot(rmse_all_season9m, aes(x = horizon, y = RMSE, col = model_id)) +
   geom_line(linewidth = 0.7) +
   geom_point(size = 1.4) +
   facet_wrap(~Season, nrow = 1) +
+  scale_color_manual(values = model_colors) +
   labs(title = "Prediction skill by horizon and season",
-       x = "Forecast horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
+       x = "Prediction horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
   theme_bw() + theme(legend.position = "top", text = element_text(size = 14))
 
 
@@ -554,6 +589,10 @@ dates (~30 days), providing a balanced comparison of forecast skill under contra
 hydrological conditions.
 
 ```{r rmse-flow-thresholds}
+# Restore 1m label map and models_keep for the flow/discharge chunks
+model_labels <- model_labels_1m
+models_keep  <- names(model_labels)
+
 # Compute percentile thresholds from the 2024 reference date discharge distribution
 q_2024 <- all_forecasts_obs |>
   distinct(reference_date) |>
@@ -585,7 +624,7 @@ calc_rmse_flow <- function(forecasts_df, ref_dates, flow_label) {
     group_by(model_id, horizon) |>
     summarise(RMSE = sqrt(mean((prediction - fDOM_obs)^2)), .groups = "drop") |>
     mutate(flow_condition = flow_label,
-           model_id = recode(model_id, !!!model_labels))
+           model_id = factor(recode(model_id, !!!model_labels), levels = model_levels))
 }
 
 rmse_low  <- calc_rmse_flow(all_forecasts_obs, low_dates,  "Low flow (5th–15th pct)")
@@ -599,9 +638,10 @@ ggplot(rmse_flow, aes(x = horizon, y = RMSE, col = model_id)) +
   geom_line(linewidth = 0.7) +
   geom_point(size = 1.4) +
   facet_wrap(~flow_condition, nrow = 1) +
+  scale_color_manual(values = model_colors) +
   labs(
     title = "Prediction skill by horizon — low vs. high discharge conditions",
-    x     = "Forecast horizon (days ahead)",
+    x     = "Prediction horizon (days ahead)",
     y     = "RMSE (QSU)",
     col   = NULL
   ) +
@@ -655,9 +695,10 @@ ggplot(rmse_monthly_flow, aes(x = horizon, y = RMSE, col = model_id)) +
   geom_line(linewidth = 0.7) +
   geom_point(size = 1.4) +
   facet_wrap(~flow_condition, nrow = 1) +
+  scale_color_manual(values = model_colors) +
   labs(
     title = "Prediction skill by horizon — wettest vs. driest month",
-    x     = "Forecast horizon (days ahead)",
+    x     = "Prediction horizon (days ahead)",
     y     = "RMSE (QSU)",
     col   = NULL
   ) +
@@ -679,13 +720,14 @@ negative values indicate worse performance. Calculated as:
 skill_rmse <- all_forecasts_obs |>
   filter(model_id %in% models_keep,
          !is.na(prediction), !is.na(fDOM_obs)) |>
-  mutate(model_id = recode(model_id, !!!model_labels)) |>
+  mutate(model_id = factor(recode(model_id, !!!model_labels), levels = model_levels)) |>
   mutate(month  = month(forecast_date),
         Season = case_when(
           month %in% c(12, 1, 2)  ~ "Winter",
           month %in% c(3,  4, 5)  ~ "Spring",
           month %in% c(6,  7, 8)  ~ "Summer",
           month %in% c(9, 10, 11) ~ "Fall")) |> 
+  #group_by(model_id, horizon) |>
   group_by(model_id, horizon, Season) |>
   summarise(RMSE = sqrt(mean((prediction - fDOM_obs)^2)), .groups = "drop") |>
   pivot_wider(names_from = model_id, values_from = RMSE) |>
@@ -695,30 +737,28 @@ skill_rmse <- all_forecasts_obs |>
     `AR + in-lake + catchment` = 1 - (`AR + in-lake + catchment` / `AR only`)
   ) |>
   # select(horizon, `AR + in-lake`, `AR + catchment`, `AR + in-lake + catchment`) |>
-  # pivot_longer(-horizon, names_to = "model_id", values_to = "skill")
+  # pivot_longer(-horizon, names_to = "model_id", values_to = "skill") |> 
     select(Season, horizon, `AR + in-lake`, `AR + catchment`, `AR + in-lake + catchment`) |>
-  pivot_longer(-c(Season, horizon), names_to = "model_id", values_to = "skill")
-```
+  pivot_longer(-c(Season, horizon), names_to = "model_id", values_to = "skill") |>
+  mutate(model_id = factor(model_id, levels = model_levels))
 
+```
+ 
 ```{r skill-plot}
 ggplot(skill_rmse, aes(x = horizon, y = skill, col = model_id)) +
-  geom_hline(yintercept = 0, linewidth = 1, linetype = "dashed", color = "gray40") +
-  geom_line(linewidth = 0.7) +
-  geom_point(size = 1.4) +
-  facet_wrap(~Season, nrow = 1)+
-  scale_color_manual(values = c(
-    "AR + in-lake"             = "#00BA38",
-    "AR + in-lake + catchment" = "#619CFF",
-    "AR + catchment"           = "#F8766D"
-  )) +
+  geom_hline(yintercept = 0, linewidth = 1, linetype = "dashed", color = "black") +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.6) +
+  facet_wrap(~factor(Season, levels = c("Spring", "Summer", "Fall", "Winter")), nrow = 1)+
+  scale_color_manual(values = model_colors) +
   labs(
     #title = "Forecast skill relative to AR-only (persistence)",
-    x     = "Forecast horizon (days ahead)",
+    x     = "Prediction horizon (days ahead)",
     y     = "Skill score",
     col   = NULL
   ) +
   theme_bw() +
-  theme(legend.position = "top", text = element_text(size = 20))
+  theme(legend.position = "top", text = element_text(size = 24))
 
 ```
 
@@ -750,47 +790,51 @@ talk_fc <- all_forecasts_obs |>
   filter(reference_date == ref_date, model_id %in% models_keep) |>
   select(Date = forecast_date, fDOM = prediction, model_id) |>
   filter(!is.na(fDOM)) |>
-  mutate(model_id = recode(model_id, !!!model_labels))
+  mutate(model_id = factor(recode(model_id, !!!model_labels), levels = model_levels))
 ```
 
 ```{r talk-forecast-plots, fig.width = 6, fig.height = 5}
-x_lim        <- c(ref_date - 3, ref_date + 30)
-y_lim        <- c(2, 20)
-model_colors <- c("AR only"                  = "#F8766D",
-                  "AR + in-lake"             = "#00BA38",
-                  "AR + in-lake + catchment" = "#619CFF",
-                  "AR + catchment"           = "#C77CFF")
+x_lim <- c(ref_date - 3, ref_date + 30)
+y_lim <- c(3, 13)
 
-base_layers <- list(
-  geom_vline(xintercept = ref_date, linetype = "dashed", color = "gray40"),
-  scale_x_date(limits = x_lim, date_labels = "%b %d"),
-  scale_y_continuous(limits = y_lim),
-  labs(x = "Date", y = "fDOM (QSU)", color = "Model",
-       title = "Example forecast for talk"),
-  theme_bw(),
-  theme(legend.position = "top", text = element_text(size = 13))
-)
+# base_layers <- list(
+#   geom_vline(xintercept = ref_date, linetype = "dashed", color = "gray40"),
+#   scale_x_date(limits = x_lim, date_labels = "%b %d"),
+#   scale_y_continuous(limits = y_lim),
+#   labs(x = "Date", y = "fDOM (QSU)", color = "Model",
+#        #title = "Example forecast for talk"),
+#   theme_bw(),
+#   theme(legend.position = "none", text = element_text(size = 13))
+# ))
 
 # --- Panel 1: pre-forecast observations only ---
 ggplot() +
-  base_layers +
+  geom_vline(xintercept = ref_date, linetype = "dashed", color = "gray40")+
   geom_point(data = pre_obs, aes(x = Date, y = fDOM),
-             color = "black", size = 2.5)
+             color = "black", size = 2.5)+
+  scale_x_date(limits = x_lim, date_labels = "%b %d")+
+  scale_y_continuous(limits = y_lim)+
+  labs(x = "Date", y = "fDOM (QSU)", color = "Model")+
+  theme_bw()+  theme(legend.position = "none", text = element_text(size = 24))
 
 # --- Panel 2: add model forecasts (all three models) ---
 ggplot() +
-  base_layers +
+    geom_vline(xintercept = ref_date, linetype = "dashed", color = "gray40")+
   geom_point(data = pre_obs, aes(x = Date, y = fDOM),
              color = "black", size = 2.5) +
   geom_line(data  = talk_fc, aes(x = Date, y = fDOM, color = model_id),
             linewidth = 0.8) +
   geom_point(data = talk_fc, aes(x = Date, y = fDOM, color = model_id),
              size = 1.8) +
-  scale_color_manual(values = model_colors)
+  scale_color_manual(values = model_colors)+
+  scale_x_date(limits = x_lim, date_labels = "%b %d")+
+  scale_y_continuous(limits = y_lim)+
+  labs(x = "Date", y = "fDOM (QSU)", color = "Model")+
+  theme_bw()+  theme(legend.position = "none", text = element_text(size = 24))
 
 # --- Panel 3: add observed values during forecast period ---
 ggplot() +
-  base_layers +
+    geom_vline(xintercept = ref_date, linetype = "dashed", color = "gray40")+
   geom_point(data = pre_obs,  aes(x = Date, y = fDOM),
              color = "black", size = 2.5) +
   geom_line(data  = talk_fc,  aes(x = Date, y = fDOM, color = model_id),
@@ -799,5 +843,11 @@ ggplot() +
              size = 1.8) +
   geom_point(data = post_obs, aes(x = Date, y = fDOM),
              color = "black", size = 2.5) +
-  scale_color_manual(values = model_colors)
+  scale_color_manual(values = model_colors)+
+  scale_x_date(limits = x_lim, date_labels = "%b %d")+
+  scale_y_continuous(limits = y_lim)+
+  labs(x = "Date", y = "fDOM (QSU)", color = "Model")+
+  theme_bw()+  theme(legend.position = "none", text = element_text(size = 24))
+
+
 ```
