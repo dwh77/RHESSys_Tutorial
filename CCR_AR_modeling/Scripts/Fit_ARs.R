@@ -4,12 +4,63 @@ getwd()
 #packages
 library(tidyverse)
 library(MuMIn) #dredge
+library(astsa) #acf
 # library(rsq) #for 'rsq' R2 function
 # library(Metrics) #for 'rmse' eval function
 
 #### Read in data ----
-ar_df <- read_csv("./CCR_AR_Modeling/Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv")
+ar_df <- read_csv("./CCR_AR_Modeling/Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
+  mutate(
+    Chla_1_ugL_7day = slider::slide_dbl(Chla_1_ugL_daily, mean, .before = 7, .after = 0, .complete = F),
+    Chla_1_ugL_14day = slider::slide_dbl(Chla_1_ugL_daily, mean, .before = 14, .after = 0, .complete = F),
+    Chla_1_ugL_28day = slider::slide_dbl(Chla_1_ugL_daily, mean, .before = 28, .after = 0, .complete = F),
+    RH_Q_m3day_7day = slider::slide_dbl(RH_Q_m3day, mean, .before = 7, .after = 0, .complete = F),
+    RH_Q_m3day_14day = slider::slide_dbl(RH_Q_m3day, mean, .before = 14, .after = 0, .complete = F),
+    RH_Q_m3day_28day = slider::slide_dbl(RH_Q_m3day, mean, .before = 28, .after = 0, .complete = F)
+
+  )
 head(ar_df)
+
+#ACF
+acf2(ar_df$fDOM_1_QSU_daily, xlim=c(1,20), na.action = na.pass) # Plots the ACF of x for lags 1 to 19
+pacf(ar_df$fDOM_1_QSU_daily, xlim = c(1,20), na.action = na.pass)
+
+
+##cor matrix
+library(corrplot)
+
+df_corr1m <- ar_df |>
+  select(fDOM_1_QSU_daily, Temp_1_C_daily, DOsat_1_pct_daily, Chla_1_ugL_daily,
+         #Chla_1_ugL_7day, Chla_1_ugL_14day, Chla_1_ugL_28day,
+        Rain_mm_daily, Rain_mm_lag1, Rain_mm_lag2, SW_Wm2_daily, RH_Q_m3day, RH_DOC_mgL,
+        RH_Q_m3day_7day, RH_Q_m3day_14day, RH_Q_m3day_28day)
+
+
+cor_matrix <- cor(df_corr1m, use = "pairwise.complete.obs")
+
+# Step 1: plot with all numbers in normal weight
+corrplot(cor_matrix,
+         method      = "color",
+         type        = "upper",
+         addCoef.col = "black",
+         tl.col      = "black",
+         tl.srt      = 45,
+         number.font = 1,          # all normal weight first
+         col         = colorRampPalette(c("#D73027", "#FFFFBF", "#1A9850"))(200))
+
+# Step 2: overlay bold numbers only where |r| >= 0.5
+bold_matrix <- cor_matrix
+bold_matrix[abs(cor_matrix) < 0.5] <- NA  # hide the weak ones
+
+corrplot(bold_matrix,
+         method      = "color",
+         type        = "upper",
+         add         = TRUE,       # overlay on existing plot
+         addCoef.col = "black",
+         tl.pos      = "n",        # suppress repeated labels
+         cl.pos      = "n",        # suppress repeated legend
+         number.font = 2,          # bold
+         col         = colorRampPalette(c("#D73027", "#FFFFBF", "#1A9850"))(200))
 
 
 #### Nice plot of fDOM at 2 depths and waterlevel ----
@@ -332,8 +383,11 @@ plot_fdom9m(predRH_df_fdom9m, model_label = "AR + RH Model")
 
 #### Set up data ----
 fdom1m <- ar_df %>%
+  mutate(Chla_1_ugL_14day_ZS = scale(Chla_1_ugL_14day)) |>
   dplyr::select(Date, fDOM_1_QSU_daily, fDOM_1m_lag1_ZS, Chla_1_ugL_daily_ZS, DOsat_1_pct_daily_ZS,
-                Temp_1_C_daily_ZS, Chla_1_ugL_10day_ZS, SW_Wm2_daily_ZS
+                Temp_1_C_daily_ZS, Chla_1_ugL_14day_ZS,
+                RH_Q_m3day_ZS, RH_DOC_mgL_ZS
+                # , SW_Wm2_daily_ZS
                 #Q_rhessys_ZS, DOC_rhessys_ZS
   ) %>%
   filter(Date < ymd("2024-01-01")) %>%
@@ -345,8 +399,9 @@ fdom1m <- na.omit(fdom1m)
 #### Build global model and dredge ----
 model_fdom1m <- glm(fDOM_1_QSU_daily ~ fDOM_1m_lag1_ZS +
                       DOsat_1_pct_daily_ZS + Temp_1_C_daily_ZS +
-                      Chla_1_ugL_daily_ZS + Chla_1_ugL_10day_ZS +
-                      SW_Wm2_daily_ZS,
+                      Chla_1_ugL_daily_ZS + Chla_1_ugL_14day_ZS +
+                      RH_Q_m3day_ZS + RH_DOC_mgL_ZS,
+                      #SW_Wm2_daily_ZS,
                     data = fdom1m, family = gaussian, na.action = na.fail)
 
 glm_fdom1m <- dredge(model_fdom1m, rank = "AICc", fixed = "fDOM_1m_lag1_ZS")
