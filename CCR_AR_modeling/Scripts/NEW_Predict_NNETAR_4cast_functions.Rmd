@@ -1,0 +1,354 @@
+---
+title: "NNETAR fDOM Forecasting — Streamlined Workflow"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    theme: flatly
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 10,
+  fig.height = 5
+)
+```
+
+---
+
+## Packages and Data
+
+Uses `forecast::nnetar()` rather than `fable::NNETAR()`. The key advantage is the
+`model =` argument: passing the originally fitted model object updates the AR lag state
+from new observed data **without refitting the network weights**. This gives the same
+fit-once / forecast-anywhere structure as the AR, RF, and XGB scripts.
+
+No `lag_col` argument is needed — NNETAR selects its autoregressive order `p`
+automatically (minimises AIC internally).
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+library(forecast)   # nnetar(), forecast.nnetar()
+library(zoo)        # na.approx for gap-filling
+```
+
+```{r load-data}
+getwd()
+ar_df <- read_csv("../Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
+  mutate(Date = as.Date(Date)) |>
+  select(Date, fDOM_1_QSU_daily,           # no lag column needed — NNETAR handles AR internally
+         Temp_1_C_daily, DOsat_1_pct_daily, Chla_1_ugL_daily,
+         RH_Q_m3day, RH_DOC_mgL)
+
+# Training window: all data before 2024
+train_cutoff <- ymd("2024-01-01")
+
+# Prediction window: every day of 2024
+pred_dates_2024 <- seq(ymd("2024-01-01"), ymd("2024-12-31"), by = "day")
+```
+
+---
+
+## Helper: Interpolate NAs
+
+NNETAR requires a complete, gap-free numeric vector. Missing values are linearly
+interpolated; leading/trailing NAs are filled by the nearest observed value (`rule = 2`).
+
+```{r fn-interpolate}
+interpolate_ts <- function(x) {
+  if (all(is.na(x))) return(x)
+  zoo::na.approx(x, na.rm = FALSE, rule = 2)
+}
+```
+
+---
+
+## Model Fitting
+
+### Fitting function
+
+Fits a NNETAR model via `forecast::nnetar()` on data before `train_cutoff`.
+`repeats = 20` averages over 20 random network initialisations for stability
+(Melofton et al. approach). Autoregressive order `p` and hidden node count `size`
+are selected automatically.
+
+External covariates are passed as the `xreg` matrix argument, equivalent to the
+multivariate NNETAR formulation in Melofton et al.
+
+There is no variable importance plot — NNETAR neural-network weights are not
+interpretable in the way RF permutation importance or XGBoost gain are.
+
+Returns the fitted model, training plot, and metadata needed for forecasting.
+
+```{r fn-fit}
+fit_nnetar_model <- function(all_data,
+                              train_cutoff,
+                              target,
+                              covariates = NULL,
+                              model_name,
+                              repeats    = 20,
+                              seed       = 100) {
+
+  set.seed(seed)
+
+  # Build training data — complete date sequence then interpolate NAs
+  train_df <- all_data |>
+    filter(Date < train_cutoff) |>
+    select(Date, all_of(c(target, covariates))) |>
+    arrange(Date) |>
+    tidyr::complete(Date = seq(min(Date), max(Date), by = "day")) |>
+    mutate(across(-Date, interpolate_ts))
+
+  y_train    <- train_df[[target]]
+  xreg_train <- if (!is.null(covariates)) as.matrix(train_df[, covariates]) else NULL
+
+  message(model_name, " | n_train = ", nrow(train_df),
+          " | covariates = ", ifelse(is.null(covariates), "none",
+                                     paste(covariates, collapse = ", ")))
+
+  # Fit NNETAR — network weights determined here and held fixed during forecasting
+  mod <- nnetar(y = y_train, xreg = xreg_train, repeats = repeats)
+
+  # In-sample fitted values (average across repeats, stored in mod$fitted)
+  train_df <- train_df |>
+    mutate(fitted = as.numeric(mod$fitted))
+
+  # Training RMSE
+  train_rmse <- sqrt(mean((train_df[[target]] - train_df$fitted)^2, na.rm = TRUE))
+
+  # Training plot: observed vs fitted timeseries
+  p_fit <- ggplot(train_df) +
+    geom_point(aes(x = Date, y = !!sym(target), color = "Observed"),
+               size = 1.2, alpha = 0.8) +
+    geom_point(aes(x = Date, y = fitted, color = "NNETAR fitted"),
+               size = 1.2, alpha = 0.8) +
+    scale_color_manual(values = c("Observed" = "black", "NNETAR fitted" = "dodgerblue"),
+                       breaks = c("Observed", "NNETAR fitted")) +
+    labs(title = paste0(model_name, " — training fit (pre-", year(train_cutoff), ")",
+                        "  |  RMSE = ", round(train_rmse, 2), " QSU"),
+         x = "Date", y = "fDOM (QSU)", color = NULL) +
+    theme_bw() +
+    theme(legend.position = "top")
+
+  list(
+    model      = mod,
+    plot       = p_fit,
+    model_name = model_name,
+    target     = target,
+    covariates = covariates,
+    repeats    = repeats,
+    train_rmse = train_rmse
+  )
+}
+```
+
+### Fit 4 models
+
+All models trained on data before `r train_cutoff`. Network weights are fixed here
+and reused for all 2024 forecasts.
+
+```{r fit-models}
+# NNETAR1: univariate (AR lags of fDOM only)
+NNETAR_lagonly <- fit_nnetar_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  covariates   = NULL,
+  model_name   = "NNETAR_lag_only"
+)
+
+# NNETAR2: + in-lake (Temp, DO, Chla)
+NNETAR_lake <- fit_nnetar_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily"),
+  model_name   = "NNETAR_lag_lake"
+)
+
+# NNETAR3: + catchment (RH discharge and DOC)
+NNETAR_catch <- fit_nnetar_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  covariates   = c("RH_Q_m3day", "RH_DOC_mgL"),
+  model_name   = "NNETAR_lag_catchment"
+)
+
+# NNETAR4: + in-lake + catchment
+NNETAR_lake_catch <- fit_nnetar_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily",
+                   "RH_Q_m3day", "RH_DOC_mgL"),
+  model_name   = "NNETAR_lag_lake_catchment"
+)
+```
+
+### Training plots
+
+```{r plot-training, fig.height=4}
+NNETAR_lagonly$plot
+NNETAR_lake$plot
+NNETAR_catch$plot
+NNETAR_lake_catch$plot
+```
+
+---
+
+## 30-Day Forecast Function
+
+The network weights are **never retrained** — the original fitted model is reused for
+every reference date.
+
+`nnetar(..., model = model_obj$model)` feeds the observed history up to the reference
+date through the fixed network to update the autoregressive lag state (essentially
+setting the correct input vector for the first forecast step). This is near-instantaneous
+because no optimisation is performed.
+
+`forecast::forecast()` then steps forward 30 days using those updated lag inputs,
+propagating uncertainty via bootstrap sampling.
+
+Observed covariate values for the 30 forecast days are supplied via `xreg`
+(perfect covariate assumption, same as AR / RF / XGB).
+
+```{r fn-forecast}
+# # inputs to test function
+forecast_date <- ymd("2024-01-01")
+model_obj <- NNETAR_lake_catch
+all_data <- ar_df
+target  = "fDOM_1_QSU_daily"
+horizon = 30
+bootstrap_times = 200
+seed            = 100
+
+forecast_fdom_30day <- function(forecast_date,
+                                 model_obj,
+                                 all_data,
+                                 target          = "fDOM_1_QSU_daily",
+                                 horizon         = 30,
+                                 seed            = 100) {
+
+  set.seed(seed)
+
+  covariates <- model_obj$covariates
+
+  # Check that observed fDOM exists on the reference date
+  curr_fdom <- all_data |>
+    filter(Date == forecast_date) |>
+    pull(!!sym(target))
+
+  if (length(curr_fdom) == 0 || is.na(curr_fdom)) return(NULL)
+
+  # History up to and including the reference date — used to update the AR lag state
+  history_df <- all_data |>
+    filter(Date <= forecast_date) |>
+    select(Date, all_of(c(target, covariates))) |>
+    arrange(Date) |>
+    tidyr::complete(Date = seq(min(Date), max(Date), by = "day")) |>
+    mutate(across(-Date, interpolate_ts))
+
+  y_history    <- history_df[[target]]
+  xreg_history <- if (!is.null(covariates)) as.matrix(history_df[, covariates]) else NULL
+
+  # Update AR lag state using fixed network weights (no retraining)
+  mod_updated <- nnetar(y = y_history, xreg = xreg_history,
+                         model = model_obj$model)
+
+  # Forecast dates: day 1 through day 30 after the reference date
+  forecast_dates <- seq(forecast_date + 1, forecast_date + horizon, by = "day")
+
+  # Covariate values for the 30 forecast days (perfect covariate assumption)
+  if (!is.null(covariates)) {
+    future_df <- all_data |>
+      filter(Date %in% forecast_dates) |>
+      select(Date, all_of(covariates)) |>
+      arrange(Date) |>
+      tidyr::complete(Date = forecast_dates) |>
+      mutate(across(-Date, interpolate_ts))
+
+    xreg_future <- as.matrix(future_df[, covariates])
+    if (nrow(xreg_future) == 0) return(NULL)
+  } else {
+    xreg_future <- NULL
+  }
+
+  # Generate 30-day forecast with bootstrap uncertainty
+  fc <- forecast(mod_updated, h = horizon, xreg = xreg_future)
+
+  # Return mean prediction — format matches AR / RF / XGB output
+  tibble(
+    model_id          = model_obj$model_name,
+    reference_date    = forecast_date,
+    forecast_date     = forecast_dates,
+    Horizon           = as.integer(forecast_dates - reference_date),
+    fDOM_1m_predicted = as.numeric(fc$mean)
+  )
+}
+
+# # test function
+zz <- forecast_fdom_30day(forecast_date = ymd("2024-01-01"), model_obj = NNETAR_lake_catch,
+                    all_data = ar_df, target = "fDOM_1_QSU_daily", horizon = 30)
+
+```
+
+---
+
+## Run Forecasts Across 2024
+
+Identical structure to the AR, RF, and XGB versions.
+
+```{r fn-loop}
+run_forecasts <- function(model_obj,
+                           all_data,
+                           pred_dates,
+                           target  = "fDOM_1_QSU_daily",
+                           horizon = 30) {
+
+  # Keep only dates with an observed target value (needed to confirm valid seed)
+  valid_dates <- all_data |>
+    filter(Date %in% pred_dates, !is.na(!!sym(target))) |>
+    pull(Date)
+
+  message(model_obj$model_name, " | forecasting ", length(valid_dates),
+          " reference dates...")
+
+  map_dfr(valid_dates, \(d) forecast_fdom_30day(
+    forecast_date = d,
+    model_obj     = model_obj,
+    all_data      = all_data,
+    target        = target,
+    horizon       = horizon
+  ))
+}
+```
+
+```{r run-forecasts}
+forecasts_nnetar1 <- run_forecasts(NNETAR_lagonly,    ar_df, pred_dates_2024)
+forecasts_nnetar2 <- run_forecasts(NNETAR_lake,       ar_df, pred_dates_2024)
+forecasts_nnetar3 <- run_forecasts(NNETAR_catch,      ar_df, pred_dates_2024)
+forecasts_nnetar4 <- run_forecasts(NNETAR_lake_catch, ar_df, pred_dates_2024)
+
+# Combine all models into one dataframe
+all_NNETAR_forecasts <- bind_rows(forecasts_nnetar1, forecasts_nnetar2,
+                                   forecasts_nnetar3, forecasts_nnetar4)
+
+glimpse(all_NNETAR_forecasts)
+```
+
+---
+
+## Save Output
+
+```{r save}
+write_csv(all_NNETAR_forecasts,
+          "../Data/NNETAR_forecasts_2024_22may26.csv")
+
+```

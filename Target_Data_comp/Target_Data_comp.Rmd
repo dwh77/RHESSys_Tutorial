@@ -26,6 +26,26 @@ daily_Q <- hpb_stage_EDI |>
          ) 
 
 
+## Plot for WVWA
+hpb_stage_EDI |> 
+  mutate(Flow_cfs = Flow_cms * 35.3147) |> 
+  ggplot(aes(x = DateTime, y = Flow_cfs))+
+  geom_point()+ labs(y = "Flow (cfs)", title = "15-min Flow from Horsepen")+
+  theme_bw()
+
+hpb_stage_EDI |> 
+  mutate(Flow_cfs = Flow_cms * 35.3147) |> 
+  ggplot(aes(x = Flow_cfs)) +
+  # geom_density()+
+  # geom_point()+
+  geom_histogram(fill = "steelblue", color = "white", bins = 20) +
+  # scale_x_log10(breaks = seq(0, 100, by = 1)) +
+  labs(  title = "Histogram of 15 min flow at Horsepen",
+    x = "Flow (cfs)",    y = "Count"  ) +  theme_bw()
+
+
+
+
 ```
 
 
@@ -58,6 +78,11 @@ USGS_Ref <- USGS_daily |>
          Tinker_Flow_m3_day = Tinker_Flow_cms * 86400 ) |> 
   select(Date, Tinker_Flow_m3_day)
 
+
+USGS_daily |> 
+  ggplot(aes(x = Date,y = Flow))+ geom_point()+
+  labs( y = "Flow (cfs)", title = "Tinker Creek USGS daily Flow ")+ theme_bw()
+
 # comp <- ggplot(Q_final, aes(x = DateTime)) +
 #   geom_point(aes(y = Flow_cms), shape = 20) +
 #   geom_line(data = USGS_Ref, aes(x = time, y = Flow_cms), color = "blue") +
@@ -65,6 +90,20 @@ USGS_Ref <- USGS_daily |>
 #   ggtitle(paste("Flow at", res, site, "and Comparison Site", ref_site))
 
 
+USGS_hf <- readNWISuv(
+  siteNumbers = ref_site,
+  parameterCd = "00060",          # discharge in cfs
+  startDate = "2010-01-01",
+  endDate   = "2026-04-01"
+) |>
+  renameNWISColumns()  
+
+#plothf 
+head(USGS_hf)
+
+USGS_hf |> 
+  ggplot(aes(x = dateTime, y = Flow_Inst))+
+  geom_line()+ labs(y = "Flow (cfs)", title = "Tinker USGS 15 min flow")
 
 ```
 
@@ -77,7 +116,7 @@ usgs_hbp_Q <- full_join(USGS_Ref, daily_Q)
 usgs_hbp_Q_filt <- usgs_hbp_Q |> 
   filter(Date < ymd("2025-04-01")) 
 
-usgs_hbp_Q |> 
+usgs_hbp_Q_filt |> 
     ggplot(aes(x = (Tinker_Flow_m3_day), y = (HPB_Flow_m3_day)))+
   geom_point()+
   #scale_y_log10()+
@@ -101,6 +140,49 @@ usgs_hbp_Q |>
   select(Date, HPB_Flow_m3_day, HPB_Q_lm_m3_day) |> 
   pivot_longer(-1) |> 
   ggplot(aes(x = Date, y = value, col = name))+ geom_point()
+
+##predict hf based on lm
+hpb_hf_interp <- USGS_hf |> 
+  filter(as.Date(dateTime) > ymd("2024-01-01")) |> 
+  mutate(Flow_m3day = (Flow_Inst * 86400)/ 35.3) |> 
+  mutate(HPB_Q_lm_m3_day = (Flow_m3day*  0.08024) - 390.81128 ) |> 
+  mutate(HPB_Q_lm_cfs = (HPB_Q_lm_m3_day*35.3)/86400) |> 
+  select(dateTime, HPB_Q_lm_cfs)
+
+hpbcfs <- hpb_stage_EDI |> 
+  mutate(Flow_cfs = Flow_cms * 35.3147) |> 
+  select(DateTime, Flow_cfs)
+
+
+full_join(hpb_hf_interp, hpbcfs, by = c("dateTime" = "DateTime")) |> 
+  pivot_longer(-1) |> 
+  ggplot(aes(x = dateTime, y = value, color = name))+ geom_point()
+
+
+interhf <- full_join(hpb_hf_interp, hpbcfs, by = c("dateTime" = "DateTime")) |> 
+  mutate(Flow_cfs_interp = ifelse(is.na(Flow_cfs), HPB_Q_lm_cfs, Flow_cfs))
+
+summary(interhf)
+
+
+###plot for WVWA
+usgs_hbp_Q |> 
+   filter(Date > ymd("2024-01-01")) |> 
+  select(Date, HPB_Flow_m3_day, HPB_Q_lm_m3_day, Tinker_Flow_m3_day) |> 
+  pivot_longer(-1) |> 
+  mutate(Flow_cfs = (value/86400)*35.3) |> 
+  ggplot(aes(x = Date, y = Flow_cfs, col = name))+ geom_point()+
+  scale_y_log10() + theme_bw()
+
+
+usgs_hbp_Q |> 
+   filter(Date > ymd("2024-01-01")) |> 
+  select(Date, HPB_Flow_m3_day, HPB_Q_lm_m3_day, Tinker_Flow_m3_day) |> 
+  pivot_longer(-1) |> 
+  mutate(Flow_cfs = (value/86400)*35.3) |> 
+  ggplot(aes(x = Flow_cfs, col = name))+ geom_histogram()+
+  facet_wrap(~name, ncol = 1)+  #scale_x_log10() + 
+  theme_bw() + labs(x = "Flow (cfs)", title = "Daily Flow (cfs) histograms for 2024 - march 2026")
 
 
 ```
@@ -127,6 +209,41 @@ filter(Reservoir == "CCR",
 
 
 hpb_flowmate <- stream_flowmate |> filter(Site == 100 )
+
+
+### Historgrams for WVWA 
+Flowmate_WVWA <- flowmate_edi |>
+filter(Reservoir == "CCR",
+         Site %in% c(101, 100, 301, 300, 201, 200)) |>
+  mutate(Site_name = ifelse(Site %in% c(101,100), "Horsepen", Site),
+         Site_name = ifelse(Site %in% c(301,300), "Sawmill", Site_name),
+         Site_name = ifelse(Site %in% c(201,200), "Carvins Creek", Site_name)
+         ) |> 
+  mutate(Date = as.Date(DateTime)) |>
+  dplyr::select(Date, Site_name, Flow_cms) |>
+  mutate(Q_cfs_Flowmate = Flow_cms * 35.3147) |>
+  select(Date, Site_name, Q_cfs_Flowmate)
+
+## plot
+z <- Flowmate_WVWA |> 
+  ggplot(aes(x = Date, y = Q_cfs_Flowmate))+
+  geom_point()+ labs(y = "Flow (cfs)" )+ 
+  facet_wrap(~Site_name) + theme_bw()
+
+z
+#plotly::ggplotly(z)
+#hist
+zz <- Flowmate_WVWA |> 
+  ggplot(aes(x = Q_cfs_Flowmate)) +
+  # geom_density()+
+  # geom_point()+
+  geom_histogram(fill = "steelblue", color = "white", bins = 20) +
+  facet_wrap(~ Site_name) +
+  # scale_x_log10()+
+  labs(  title = "Distribution of Flow by Site",
+    x = "Flow (cfs)",    y = "Count"  ) +  theme_bw()
+
+zz
 
 ```
 

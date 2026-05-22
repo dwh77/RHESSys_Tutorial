@@ -1,0 +1,378 @@
+---
+title: "AR fDOM Forecasting — Streamlined Workflow"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    theme: flatly
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 10,
+  fig.height = 5
+)
+```
+
+---
+
+## Packages and Data
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+```
+
+```{r load-data}
+getwd()
+ar_df <- read_csv("../Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
+  mutate(Date = as.Date(Date)) |> 
+  select(Date, fDOM_1_QSU_daily, fDOM_1m_lag1, 
+         Temp_1_C_daily, DOsat_1_pct_daily, Chla_1_ugL_daily,
+         RH_Q_m3day, RH_DOC_mgL)
+
+# Training window: all data before 2024
+train_cutoff <- ymd("2024-01-01")
+
+# Prediction window: every day of 2024
+pred_dates_2024 <- seq(ymd("2024-01-01"), ymd("2024-12-31"), by = "day")
+
+```
+
+---
+
+## Model Fitting
+
+### Fitting function
+
+Fits a Gaussian GLM on data before `train_cutoff`. Returns the fitted model object,
+metadata needed for forecasting, and a training plot of observed vs fitted.
+
+```{r fn-fit}
+fit_ar_glm <- function(all_data,
+                        train_cutoff,
+                        target,
+                        lag_col,
+                        covariates = NULL,
+                        model_name) {
+
+  # Build training data — drop NAs in all model columns
+  train_df <- all_data |>
+    filter(Date < train_cutoff,
+           !is.na(!!sym(target)),
+           !is.na(!!sym(lag_col)))
+
+  if (!is.null(covariates)) {
+    for (cv in covariates) train_df <- train_df |> filter(!is.na(!!sym(cv)))
+  }
+
+  # Build formula and fit GLM
+  rhs     <- paste(c(lag_col, covariates), collapse = " + ")
+  formula <- as.formula(paste(target, "~", rhs))
+  mod     <- glm(formula, data = train_df, family = gaussian, na.action = na.fail)
+
+  # In-sample fitted values
+  train_df <- train_df |> mutate(fitted = predict(mod, newdata = train_df))
+
+  # Training plot: observed vs fitted timeseries
+  p <- ggplot(train_df) +
+    geom_point(aes(x = Date, y = !!sym(target), color = "Observed"),
+               size = 1.2, alpha = 0.8) +
+    geom_point(aes(x = Date, y = fitted, color = "Fitted"),
+               size = 1.2, alpha = 0.8) +
+    scale_color_manual(values = c("Observed" = "black", "Fitted" = "dodgerblue"),
+                       breaks = c("Observed", "Fitted")) +
+    labs(title = paste0(model_name, " — training fit (pre-", year(train_cutoff), ")"),
+         x = "Date", y = "fDOM (QSU)", color = NULL) +
+    theme_bw() +
+    theme(legend.position = "top")
+
+  print(summary(mod))
+
+  list(
+    model      = mod,
+    plot       = p,
+    model_name = model_name,
+    target     = target,
+    lag_col    = lag_col,
+    covariates = covariates
+  )
+}
+```
+
+### Fit 4 models
+
+All models trained on data before `r train_cutoff`.
+
+```{r fit-models, results='hide'}
+# M1: lag only
+AR_lagonly <- fit_ar_glm(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  lag_col      = "fDOM_1m_lag1",
+  covariates   = NULL,
+  model_name   = "AR_lag_only"
+)
+
+# M2: lag + in-lake (Temp, DO, Chla)
+AR_lake <- fit_ar_glm(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  lag_col      = "fDOM_1m_lag1",
+  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily"),
+  model_name   = "AR_lag_lake"
+)
+
+# M3: lag + catchment (RH discharge and DOC)
+AR_catch <- fit_ar_glm(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  lag_col      = "fDOM_1m_lag1",
+  covariates   = c("RH_Q_m3day", "RH_DOC_mgL"),
+  model_name   = "AR_lag_catchment"
+)
+
+# M4: lag + in-lake + catchment
+AR_lake_catch <- fit_ar_glm(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  lag_col      = "fDOM_1m_lag1",
+  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily",
+                   "RH_Q_m3day", "RH_DOC_mgL"),
+  model_name   = "AR_lag_lake_catchment"
+)
+
+
+```
+
+### Training plots
+
+```{r plot-training, fig.height=4}
+AR_lagonly$plot
+AR_lake$plot
+AR_catch$plot
+AR_lake_catch$plot
+```
+
+AIC
+Thing to check: that training data is same for all models (incase of weird NA missing a few for one co-var)
+```{r}
+
+AIC(m1_1m$model, m2b_1m$model, m4b_1m$model,  m5_1m$model)
+
+```
+
+
+---
+
+## 30-Day Forecast Function
+
+Generates a 30-day ahead forecast from a single reference date. Follows the
+pre-allocated dataframe + for-loop pattern (dwh77/fDOM_forecasting): the dataframe
+is seeded with the observed fDOM value on the reference date, then each row is filled
+sequentially with the lag pulled from the prior row's prediction.
+
+Observed covariate values are used at each forecast step (perfect covariate assumption).
+
+```{r fn-forecast}
+# #inputs to test function
+# forecast_date <- ymd("2024-01-01")
+# model_obj <- AR_lake_catch
+# all_data <- ar_df
+# target  = "fDOM_1_QSU_daily"
+# horizon = 30
+
+
+forecast_fdom_30day <- function(forecast_date,
+                                 model_obj,
+                                 all_data,
+                                 target  = "fDOM_1_QSU_daily",
+                                 horizon = 30) {
+
+  lag_col    <- model_obj$lag_col
+  covariates <- model_obj$covariates
+  model      <- model_obj$model
+
+  # Seed: observed fDOM on the reference date
+  curr_fdom <- all_data |>
+    filter(Date == forecast_date) |>
+    pull(!!sym(target))
+
+  if (length(curr_fdom) == 0 || is.na(curr_fdom)) return(NULL)
+  
+  # Mask future fDOM — prevents any observed or lagged fDOM on/after forecast_date from being accessible during the forecast loop
+  all_data <- all_data |>
+    mutate(
+      !!sym(target)  := if_else(Date >= forecast_date, NA_real_, !!sym(target)),
+      !!sym(lag_col) := if_else(Date >  forecast_date, NA_real_, !!sym(lag_col))
+    )
+
+  # Sequence of dates: reference date through 30 days ahead
+  forecast_dates <- seq(from = forecast_date,
+                        to   = forecast_date + horizon,
+                        by   = "day")
+
+  # Pre-allocate forecast dataframe
+  forecast_df <- tibble(
+    model_id =  model_obj$model_name,
+    reference_date    = forecast_date,
+    forecast_date     = forecast_dates,
+    Horizon           = as.integer(forecast_dates - reference_date),
+    fDOM_1m_predicted = as.double(NA)
+  )
+
+  # Seed horizon 0 with the observed value (used as lag for step 1)
+  forecast_df$fDOM_1m_predicted[1] <- curr_fdom
+
+  # Step forward one day at a time
+  for (i in 2:length(forecast_dates)) {
+
+    # Lag: prior step's prediction pulled from the forecast dataframe
+    fdom_lag <- forecast_df$fDOM_1m_predicted[i - 1]
+
+    # Covariates: observed values for this forecast date
+    fc_row <- all_data |> filter(Date == forecast_dates[i])
+    if (nrow(fc_row) == 0) next
+
+    # Assemble newdata for predict()
+    newdata <- setNames(data.frame(fdom_lag), lag_col)
+    if (!is.null(covariates)) {
+      for (cv in covariates) newdata[[cv]] <- fc_row[[cv]]
+    }
+
+    forecast_df$fDOM_1m_predicted[i] <- as.numeric(predict(model, newdata = newdata))
+  }
+
+  # Return only the 30 forecast days (drop horizon 0 seed row)
+  forecast_df |> filter(Horizon > 0)
+} #end of function 
+
+
+# #test function
+# zz <- forecast_fdom_30day(forecast_date = ymd("2024-01-01"), model_obj = AR_lake_catch,
+#                     all_data = ar_df, target  = "fDOM_1_QSU_daily", horizon = 30)
+
+
+
+```
+
+---
+
+## Run Forecasts Across 2024
+
+`run_forecasts()` loops `forecast_fdom_30day()` over every valid prediction date
+(days where observed fDOM exists to seed the lag) and appends all outputs together.
+
+```{r fn-loop}
+run_forecasts <- function(model_obj,
+                           all_data,
+                           pred_dates,
+                           target  = "fDOM_1_QSU_daily",
+                           horizon = 30) {
+
+  # Keep only dates with an observed target value (needed to seed the lag)
+  valid_dates <- all_data |>
+    filter(Date %in% pred_dates, !is.na(!!sym(target))) |>
+    pull(Date)
+
+  message(model_obj$model_name, " | forecasting ", length(valid_dates),
+          " reference dates...")
+
+  map_dfr(valid_dates, \(d) forecast_fdom_30day(
+    forecast_date = d,
+    model_obj     = model_obj,
+    all_data      = all_data,
+    target        = target,
+    horizon       = horizon
+  )) 
+}
+```
+
+```{r run-forecasts}
+forecasts_m1 <- run_forecasts(AR_lagonly, ar_df, pred_dates_2024)
+forecasts_m2 <- run_forecasts(AR_lake, ar_df, pred_dates_2024)
+forecasts_m3 <- run_forecasts(AR_catch, ar_df, pred_dates_2024)
+forecasts_m4 <- run_forecasts(AR_lake_catch, ar_df, pred_dates_2024)
+
+# Combine all models into one dataframe
+all_AR_forecasts <- bind_rows(forecasts_m1, forecasts_m2, forecasts_m3, forecasts_m4)
+
+glimpse(all_AR_forecasts)
+
+```
+
+---
+
+## Save Output
+
+```{r save}
+write_csv(all_AR_forecasts,
+          "../Data/AR_forecasts_2024_22may26.csv")
+
+message("Saved ", nrow(all_forecasts), " forecast rows across ",
+        n_distinct(all_forecasts$model_id), " models.")
+```
+
+
+
+
+## Run persistence
+
+```{r}
+forecast_persistence <- function(forecast_date,
+                                  all_data,
+                                  target  = "fDOM_1_QSU_daily",
+                                  horizon = 30) {
+
+  curr_fdom <- all_data |>
+    filter(Date == forecast_date) |>
+    pull(!!sym(target))
+
+  if (length(curr_fdom) == 0 || is.na(curr_fdom)) return(NULL)
+
+  tibble(
+    model_id          = "Persistence",
+    reference_date    = forecast_date,
+    forecast_date     = forecast_date + 1:horizon,
+    Horizon           = 1:horizon,
+    fDOM_1m_predicted = curr_fdom
+  )
+}
+
+# Run across 2024
+valid_dates <- ar_df |>
+  filter(Date %in% pred_dates_2024, !is.na(fDOM_1_QSU_daily)) |>
+  pull(Date)
+
+all_persistence_forecasts <- map_dfr(valid_dates, \(d)
+  forecast_persistence(forecast_date = d, all_data = ar_df))
+
+
+write_csv(all_persistence_forecasts,
+          "../Data/Persistence_forecasts_2024_22may26.csv")
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

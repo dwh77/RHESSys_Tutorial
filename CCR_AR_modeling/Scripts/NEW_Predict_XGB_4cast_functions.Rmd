@@ -1,0 +1,362 @@
+---
+title: "XGBoost fDOM Forecasting — Streamlined Workflow"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    theme: flatly
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 10,
+  fig.height = 5
+)
+```
+
+---
+
+## Packages and Data
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+library(tidymodels)
+library(vip)
+tidymodels_prefer()
+```
+
+```{r load-data}
+getwd()
+ar_df <- read_csv("../Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
+  mutate(Date = as.Date(Date)) |>
+  select(Date, fDOM_1_QSU_daily, fDOM_1m_lag1,
+         Temp_1_C_daily, DOsat_1_pct_daily, Chla_1_ugL_daily,
+         RH_Q_m3day, RH_DOC_mgL)
+
+# Training window: all data before 2024
+train_cutoff <- ymd("2024-01-01")
+
+# Prediction window: every day of 2024
+pred_dates_2024 <- seq(ymd("2024-01-01"), ymd("2024-12-31"), by = "day")
+```
+
+---
+
+## Model Fitting
+
+### Fitting function
+
+Fits an XGBoost model via parsnip (Melofton et al. approach) on data before
+`train_cutoff`. Hyperparameters are fixed: `trees = 500`, `tree_depth = 4`,
+`learn_rate = 0.05`, `min_n = 10` — tuning can be swapped in later.
+
+The fitted object is a tidymodels `workflow_fit`, which keeps the preprocessing
+recipe and model together. `predict(workflow_fit, new_data = ...)` returns a
+tibble with a `.pred` column.
+
+Returns the fitted workflow, metadata for forecasting, a training plot of
+observed vs fitted, and a variable importance plot.
+
+```{r fn-fit}
+fit_xgb_model <- function(all_data,
+                            train_cutoff,
+                            target,
+                            lag_col,
+                            covariates = NULL,
+                            model_name,
+                            trees      = 500,
+                            tree_depth = 4,
+                            learn_rate = 0.05,
+                            min_n      = 10,
+                            seed       = 100) {
+
+  set.seed(seed)
+  feature_cols <- c(lag_col, covariates)
+
+  # Build training data — keep Date for plotting, drop it before fitting
+  train_df_full <- all_data |>
+    filter(Date < train_cutoff) |>
+    select(Date, all_of(c(target, feature_cols))) |>
+    na.omit()
+
+  train_df <- train_df_full |> select(-Date)
+
+  message(model_name, " | n_train = ", nrow(train_df),
+          " | p = ", length(feature_cols))
+
+  # Define model spec
+  xgb_spec <- boost_tree(
+    trees      = trees,
+    tree_depth = tree_depth,
+    learn_rate = learn_rate,
+    min_n      = min_n
+  ) |>
+    set_engine("xgboost") |>
+    set_mode("regression")
+
+  # Build workflow with recipe + model, then fit
+  xgb_wf <- workflow() |>
+    add_recipe(recipe(as.formula(paste(target, "~ .")), data = train_df)) |>
+    add_model(xgb_spec)
+
+  xgb_fit <- xgb_wf |> fit(data = train_df)
+
+  # In-sample fitted values
+  train_df_full <- train_df_full |>
+    mutate(fitted = predict(xgb_fit, new_data = train_df)$.pred)
+
+  # Training RMSE
+  train_rmse <- sqrt(mean((train_df_full[[target]] - train_df_full$fitted)^2,
+                           na.rm = TRUE))
+
+  # Training plot: observed vs fitted timeseries
+  p_fit <- ggplot(train_df_full) +
+    geom_point(aes(x = Date, y = !!sym(target), color = "Observed"),
+               size = 1.2, alpha = 0.8) +
+    geom_point(aes(x = Date, y = fitted, color = "XGB fitted"),
+               size = 1.2, alpha = 0.8) +
+    scale_color_manual(values = c("Observed" = "black", "XGB fitted" = "dodgerblue"),
+                       breaks = c("Observed", "XGB fitted")) +
+    labs(title = paste0(model_name, " — training fit (pre-", year(train_cutoff), ")",
+                        "  |  RMSE = ", round(train_rmse, 2), " QSU"),
+         x = "Date", y = "fDOM (QSU)", color = NULL) +
+    theme_bw() +
+    theme(legend.position = "top")
+
+  # Variable importance plot using vip package (gain-based importance)
+  imp_df <- vip::vi(xgb_fit) |>
+    arrange(desc(Importance))
+
+  p_imp <- ggplot(imp_df, aes(x = Importance, y = reorder(Variable, Importance))) +
+    geom_col(fill = "#F8766D") +
+    labs(title = paste0(model_name, " — variable importance"),
+         x = "Importance (XGBoost gain)", y = NULL) +
+    theme_bw() +
+    theme(text = element_text(size = 12))
+
+  list(
+    model          = xgb_fit,
+    plot           = p_fit,
+    importance_plot = p_imp,
+    model_name     = model_name,
+    target         = target,
+    lag_col        = lag_col,
+    covariates     = covariates,
+    train_rmse     = train_rmse
+  )
+}
+```
+
+### Fit 4 models
+
+All models trained on data before `r train_cutoff`.
+
+```{r fit-models}
+# XGB1: lag only
+XGB_lagonly <- fit_xgb_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  lag_col      = "fDOM_1m_lag1",
+  covariates   = NULL,
+  model_name   = "XGB_lag_only"
+)
+
+# XGB2: lag + in-lake (Temp, DO, Chla)
+XGB_lake <- fit_xgb_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  lag_col      = "fDOM_1m_lag1",
+  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily"),
+  model_name   = "XGB_lag_lake"
+)
+
+# XGB3: lag + catchment (RH discharge and DOC)
+XGB_catch <- fit_xgb_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  lag_col      = "fDOM_1m_lag1",
+  covariates   = c("RH_Q_m3day", "RH_DOC_mgL"),
+  model_name   = "XGB_lag_catchment"
+)
+
+# XGB4: lag + in-lake + catchment
+XGB_lake_catch <- fit_xgb_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  lag_col      = "fDOM_1m_lag1",
+  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily",
+                   "RH_Q_m3day", "RH_DOC_mgL"),
+  model_name   = "XGB_lag_lake_catchment"
+)
+```
+
+### Training plots
+
+```{r plot-training, fig.height=4}
+XGB_lagonly$plot
+XGB_lake$plot
+XGB_catch$plot
+XGB_lake_catch$plot
+```
+
+### Variable importance plots
+
+```{r plot-importance, fig.height=4}
+XGB_lagonly$importance_plot
+XGB_lake$importance_plot
+XGB_catch$importance_plot
+XGB_lake_catch$importance_plot
+```
+
+---
+
+## 30-Day Forecast Function
+
+Same structure as the AR and RF versions. The only difference is that parsnip's
+`predict()` takes `new_data` (not `newdata`) and returns a tibble — `.pred` is
+extracted rather than wrapping in `as.numeric()`.
+
+```{r fn-forecast}
+# # inputs to test function
+# forecast_date <- ymd("2024-01-01")
+# model_obj <- XGB_lake_catch
+# all_data <- ar_df
+# target  = "fDOM_1_QSU_daily"
+# horizon = 30
+
+forecast_fdom_30day <- function(forecast_date,
+                                 model_obj,
+                                 all_data,
+                                 target  = "fDOM_1_QSU_daily",
+                                 horizon = 30) {
+
+  lag_col    <- model_obj$lag_col
+  covariates <- model_obj$covariates
+  model      <- model_obj$model
+
+  # Seed: extracted BEFORE masking — reference date observation is valid IC
+  curr_fdom <- all_data |>
+    filter(Date == forecast_date) |>
+    pull(!!sym(target))
+
+  if (length(curr_fdom) == 0 || is.na(curr_fdom)) return(NULL)
+
+  # Mask future fDOM — prevents any observed or lagged fDOM on/after forecast_date
+  # from being accessible during the forecast loop
+  all_data <- all_data |>
+    mutate(
+      !!sym(target)  := if_else(Date >= forecast_date, NA_real_, !!sym(target)),
+      !!sym(lag_col) := if_else(Date >  forecast_date, NA_real_, !!sym(lag_col))
+    )
+
+  # Sequence of dates: reference date through 30 days ahead
+  forecast_dates <- seq(from = forecast_date,
+                        to   = forecast_date + horizon,
+                        by   = "day")
+
+  # Pre-allocate forecast dataframe
+  forecast_df <- tibble(
+    model_id          = model_obj$model_name,
+    reference_date    = forecast_date,
+    forecast_date     = forecast_dates,
+    Horizon           = as.integer(forecast_dates - reference_date),
+    fDOM_1m_predicted = as.double(NA)
+  )
+
+  # Seed horizon 0 with the observed value (used as lag for step 1)
+  forecast_df$fDOM_1m_predicted[1] <- curr_fdom
+
+  # Step forward one day at a time
+  for (i in 2:length(forecast_dates)) {
+
+    # Lag: prior step's prediction pulled from the forecast dataframe
+    fdom_lag <- forecast_df$fDOM_1m_predicted[i - 1]
+
+    # Covariates: observed values for this forecast date
+    fc_row <- all_data |> filter(Date == forecast_dates[i])
+    if (nrow(fc_row) == 0) next
+
+    # Assemble newdata for predict() — parsnip requires a tibble via new_data
+    newdata <- setNames(tibble(fdom_lag), lag_col)
+    if (!is.null(covariates)) {
+      for (cv in covariates) newdata[[cv]] <- fc_row[[cv]]
+    }
+
+    # parsnip predict returns a tibble; extract .pred
+    forecast_df$fDOM_1m_predicted[i] <- predict(model, new_data = newdata)$.pred
+  }
+
+  # Return only the 30 forecast days (drop horizon 0 seed row)
+  forecast_df |> filter(Horizon > 0)
+} # end function
+
+# # test function
+# zz <- forecast_fdom_30day(forecast_date = ymd("2024-01-01"), model_obj = XGB_lake_catch,
+#                     all_data = ar_df, target = "fDOM_1_QSU_daily", horizon = 30)
+```
+
+---
+
+## Run Forecasts Across 2024
+
+Identical to the AR and RF versions.
+
+```{r fn-loop}
+run_forecasts <- function(model_obj,
+                           all_data,
+                           pred_dates,
+                           target  = "fDOM_1_QSU_daily",
+                           horizon = 30) {
+
+  # Keep only dates with an observed target value (needed to seed the lag)
+  valid_dates <- all_data |>
+    filter(Date %in% pred_dates, !is.na(!!sym(target))) |>
+    pull(Date)
+
+  message(model_obj$model_name, " | forecasting ", length(valid_dates),
+          " reference dates...")
+
+  map_dfr(valid_dates, \(d) forecast_fdom_30day(
+    forecast_date = d,
+    model_obj     = model_obj,
+    all_data      = all_data,
+    target        = target,
+    horizon       = horizon
+  ))
+}
+```
+
+```{r run-forecasts}
+forecasts_xgb1 <- run_forecasts(XGB_lagonly,    ar_df, pred_dates_2024)
+forecasts_xgb2 <- run_forecasts(XGB_lake,       ar_df, pred_dates_2024)
+forecasts_xgb3 <- run_forecasts(XGB_catch,      ar_df, pred_dates_2024)
+forecasts_xgb4 <- run_forecasts(XGB_lake_catch, ar_df, pred_dates_2024)
+
+# Combine all models into one dataframe
+all_XGB_forecasts <- bind_rows(forecasts_xgb1, forecasts_xgb2,
+                                forecasts_xgb3, forecasts_xgb4)
+
+glimpse(all_XGB_forecasts)
+```
+
+---
+
+## Save Output
+
+```{r save}
+write_csv(all_XGB_forecasts,
+          "../Data/XGB_forecasts_2024.csv")
+
+message("Saved ", nrow(all_XGB_forecasts), " forecast rows across ",
+        n_distinct(all_XGB_forecasts$model_id), " models.")
+```
