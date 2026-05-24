@@ -50,6 +50,48 @@ pred_dates_2024 <- seq(ymd("2024-01-01"), ymd("2024-12-31"), by = "day")
 
 ## Model Fitting
 
+
+non function fit 
+
+```{r}
+set.seed(100)
+
+target     <- "fDOM_1_QSU_daily"
+lag_col    <- "fDOM_1m_lag1"
+covariates <- c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily",
+                "RH_Q_m3day", "RH_DOC_mgL")
+feature_cols <- c(lag_col, covariates)
+
+train_df_full <- ar_df |>
+  filter(Date < train_cutoff) |>
+  select(Date, all_of(c(target, feature_cols))) |>
+  na.omit()
+
+train_df <- train_df_full |> select(-Date)
+
+xgb_spec <- boost_tree(trees = 500, tree_depth = 4,
+                        learn_rate = 0.05, min_n = 10) |>
+  set_engine("xgboost") |>
+  set_mode("regression")
+
+xgb_wf <- workflow() |>
+  add_recipe(recipe(as.formula(paste(target, "~ .")), data = train_df)) |>
+  add_model(xgb_spec)
+
+xgb_fit <- xgb_wf |> fit(data = train_df)
+
+# check what we get from the engine
+xgb_engine <- extract_fit_engine(xgb_fit)
+class(xgb_engine)
+
+# try importance
+xgboost::xgb.importance(model = xgb_engine, feature_names = feature_cols)
+
+```
+
+
+
+
 ### Fitting function
 
 Fits an XGBoost model via parsnip (Melofton et al. approach) on data before
@@ -129,8 +171,13 @@ fit_xgb_model <- function(all_data,
     theme_bw() +
     theme(legend.position = "top")
 
-  # Variable importance plot using vip package (gain-based importance)
-  imp_df <- vip::vi(xgb_fit) |>
+  # Variable importance — extract raw xgboost engine and use xgb.importance directly
+  # (bypasses vip/parsnip wrapper that triggers a JSON casting bug in newer xgboost)
+  xgb_engine <- extract_fit_engine(xgb_fit)
+  imp_df <- xgboost::xgb.importance(model = xgb_engine,
+                                     feature_names = feature_cols) |>
+    as_tibble() |>
+    rename(Variable = Feature, Importance = Gain) |>
     arrange(desc(Importance))
 
   p_imp <- ggplot(imp_df, aes(x = Importance, y = reorder(Variable, Importance))) +
@@ -158,15 +205,15 @@ fit_xgb_model <- function(all_data,
 All models trained on data before `r train_cutoff`.
 
 ```{r fit-models}
-# XGB1: lag only
-XGB_lagonly <- fit_xgb_model(
-  all_data     = ar_df,
-  train_cutoff = train_cutoff,
-  target       = "fDOM_1_QSU_daily",
-  lag_col      = "fDOM_1m_lag1",
-  covariates   = NULL,
-  model_name   = "XGB_lag_only"
-)
+# # XGB1: lag only
+# XGB_lagonly <- fit_xgb_model(
+#   all_data     = ar_df,
+#   train_cutoff = train_cutoff,
+#   target       = "fDOM_1_QSU_daily",
+#   lag_col      = "fDOM_1m_lag1",
+#   covariates   = NULL,
+#   model_name   = "XGB_lag_only"
+# )
 
 # XGB2: lag + in-lake (Temp, DO, Chla)
 XGB_lake <- fit_xgb_model(
@@ -203,7 +250,7 @@ XGB_lake_catch <- fit_xgb_model(
 ### Training plots
 
 ```{r plot-training, fig.height=4}
-XGB_lagonly$plot
+# XGB_lagonly$plot
 XGB_lake$plot
 XGB_catch$plot
 XGB_lake_catch$plot
@@ -212,7 +259,7 @@ XGB_lake_catch$plot
 ### Variable importance plots
 
 ```{r plot-importance, fig.height=4}
-XGB_lagonly$importance_plot
+# XGB_lagonly$importance_plot
 XGB_lake$importance_plot
 XGB_catch$importance_plot
 XGB_lake_catch$importance_plot
@@ -337,13 +384,14 @@ run_forecasts <- function(model_obj,
 ```
 
 ```{r run-forecasts}
-forecasts_xgb1 <- run_forecasts(XGB_lagonly,    ar_df, pred_dates_2024)
+# forecasts_xgb1 <- run_forecasts(XGB_lagonly,    ar_df, pred_dates_2024)
 forecasts_xgb2 <- run_forecasts(XGB_lake,       ar_df, pred_dates_2024)
 forecasts_xgb3 <- run_forecasts(XGB_catch,      ar_df, pred_dates_2024)
 forecasts_xgb4 <- run_forecasts(XGB_lake_catch, ar_df, pred_dates_2024)
 
 # Combine all models into one dataframe
-all_XGB_forecasts <- bind_rows(forecasts_xgb1, forecasts_xgb2,
+all_XGB_forecasts <- bind_rows(#forecasts_xgb1, 
+                                forecasts_xgb2,
                                 forecasts_xgb3, forecasts_xgb4)
 
 glimpse(all_XGB_forecasts)
@@ -355,8 +403,6 @@ glimpse(all_XGB_forecasts)
 
 ```{r save}
 write_csv(all_XGB_forecasts,
-          "../Data/XGB_forecasts_2024.csv")
+          "../Data/XGB_forecasts_2024_24may26.csv")
 
-message("Saved ", nrow(all_XGB_forecasts), " forecast rows across ",
-        n_distinct(all_XGB_forecasts$model_id), " models.")
 ```

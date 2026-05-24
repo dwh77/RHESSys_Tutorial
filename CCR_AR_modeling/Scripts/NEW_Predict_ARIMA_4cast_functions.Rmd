@@ -1,0 +1,372 @@
+---
+title: "ARIMA fDOM Forecasting — Streamlined Workflow"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    theme: flatly
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 10,
+  fig.height = 5
+)
+```
+
+---
+
+## Packages and Data
+
+Uses `fable::ARIMA()` with automatic order selection (AIC-based). Univariate models
+fit a standard ARIMA; covariate models fit regression with ARIMA errors (ARIMAX),
+following Melofton et al.
+
+Forecasting uses `fabletools::refit(..., reestimate = FALSE)` to update the model
+state (residuals, differenced values) to the reference date **without re-estimating
+parameters** — giving the same fit-once structure as the AR, RF, XGB, and NNETAR scripts.
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+library(fable)      # ARIMA()
+library(fabletools) # refit()
+library(feasts)     # gg_tsresiduals()
+library(tsibble)
+library(zoo)        # na.approx
+```
+
+```{r load-data}
+getwd()
+ar_df <- read_csv("../Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
+  mutate(Date = as.Date(Date)) |>
+  filter(Date >= ymd("2021-08-19")) |> 
+  select(Date, fDOM_1_QSU_daily,
+         Temp_1_C_daily, DOsat_1_pct_daily, Chla_1_ugL_daily,
+         RH_Q_m3day, RH_DOC_mgL)
+
+
+ar_df |> ggplot(aes(x = Date, y = fDOM_1_QSU_daily))+ geom_point()
+
+# Training window: all data before 2024
+train_cutoff <- ymd("2024-01-01")
+
+# Prediction window: every day of 2024
+pred_dates_2024 <- seq(ymd("2024-01-01"), ymd("2024-12-31"), by = "day")
+```
+
+---
+
+## Helper: Interpolate NAs
+
+ARIMA requires a complete time series index. Missing values are linearly interpolated;
+leading/trailing NAs filled by the nearest observed value.
+
+```{r fn-interpolate}
+interpolate_ts <- function(x) {
+  if (all(is.na(x))) return(x)
+  zoo::na.approx(x, na.rm = FALSE, rule = 2)
+}
+```
+
+---
+
+## Model Fitting
+
+### Fitting function
+
+Fits an ARIMA model via `fable::ARIMA()` on data before `train_cutoff`. Order (p,d,q)
+is selected automatically by AIC. With covariates, fits regression with ARIMA errors
+(ARIMAX) — identical to Melofton et al.'s `(b) Reg. w/ ARIMA errors` specification.
+
+Returns the fitted mable, training plot, residual diagnostics, and metadata.
+
+```{r fn-fit}
+fit_arima_model <- function(all_data,
+                             train_cutoff,
+                             target,
+                             covariates  = NULL,
+                             model_name,
+                             seed        = 100) {
+
+  set.seed(seed)
+
+  col_select <- c(target, covariates)
+
+  train_df <- all_data |>
+    filter(Date < train_cutoff) |>
+    select(Date, all_of(col_select)) |>
+    arrange(Date) # |>
+    # tidyr::complete(Date = seq(min(Date), max(Date), by = "day")) |>
+    # mutate(across(-Date, interpolate_ts))
+
+  train_ts <- as_tsibble(train_df, index = Date)
+
+  message(model_name, " | n_train = ", nrow(train_df))
+
+  # Fit ARIMA — univariate uses sym injection; covariate uses standard formula
+  if (is.null(covariates)) {
+    arima_fit <- train_ts |>
+      model(arima = fable::ARIMA(!!sym(target)))
+  } else {
+    formula_obj <- as.formula(paste(target, "~",
+                                    paste(covariates, collapse = " + ")))
+    arima_fit <- train_ts |>
+      model(arima = fable::ARIMA(formula = formula_obj))
+  }
+
+  # Report selected ARIMA order
+  message(model_name, " | ", capture.output(report(arima_fit))[1])
+
+  # In-sample fitted values
+  fitted_vals <- fitted(arima_fit) |>
+    as_tibble() |>
+    select(Date, .fitted)
+
+  train_df_plot <- train_df |>
+    left_join(fitted_vals, by = "Date")
+
+  train_rmse <- sqrt(mean((train_df_plot[[target]] - train_df_plot$.fitted)^2,
+                           na.rm = TRUE))
+
+  # Training plot: observed vs fitted timeseries
+  p_fit <- ggplot(train_df_plot) +
+    geom_point(aes(x = Date, y = !!sym(target), color = "Observed"),
+               size = 1.2, alpha = 0.8) +
+    geom_point(aes(x = Date, y = .fitted, color = "ARIMA fitted"),
+               size = 1.2, alpha = 0.8) +
+    scale_color_manual(values = c("Observed" = "black", "ARIMA fitted" = "dodgerblue"),
+                       breaks = c("Observed", "ARIMA fitted")) +
+    labs(title = paste0(model_name, " — training fit (pre-", year(train_cutoff), ")",
+                        "  |  RMSE = ", round(train_rmse, 2), " QSU"),
+         x = "Date", y = "fDOM (QSU)", color = NULL) +
+    theme_bw() +
+    theme(legend.position = "top")
+
+  # Residual diagnostics (Melofton et al. approach)
+  p_resid <- gg_tsresiduals(arima_fit)
+
+  list(
+    model       = arima_fit,
+    plot        = p_fit,
+    resid_plot  = p_resid,
+    model_name  = model_name,
+    target      = target,
+    covariates  = covariates,
+    train_rmse  = train_rmse
+  )
+}
+```
+
+### Fit 4 models
+
+All models trained on data before `r train_cutoff`. ARIMA orders are fixed here
+and reused for all 2024 forecasts via `refit(reestimate = FALSE)`.
+
+```{r fit-models}
+# ARIMA1: univariate (auto-selected order, no external regressors)
+ARIMA_lagonly <- fit_arima_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  covariates   = NULL,
+  model_name   = "ARIMA_lag_only"
+)
+
+# ARIMA2: regression w/ ARIMA errors + in-lake (Temp, DO, Chla)
+ARIMA_lake <- fit_arima_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily"),
+  model_name   = "ARIMA_lag_lake"
+)
+
+# ARIMA3: regression w/ ARIMA errors + catchment (RH discharge and DOC)
+ARIMA_catch <- fit_arima_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  covariates   = c("RH_Q_m3day", "RH_DOC_mgL"),
+  model_name   = "ARIMA_lag_catchment"
+)
+
+# ARIMA4: regression w/ ARIMA errors + in-lake + catchment
+ARIMA_lake_catch <- fit_arima_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily",
+                   "RH_Q_m3day", "RH_DOC_mgL"),
+  model_name   = "ARIMA_lag_lake_catchment"
+)
+```
+
+### Training plots
+
+```{r plot-training, fig.height=4}
+ARIMA_lagonly$plot
+ARIMA_lake$plot
+ARIMA_catch$plot
+ARIMA_lake_catch$plot
+```
+
+### Residual diagnostics
+
+```{r plot-residuals, fig.height=5}
+ARIMA_lagonly$resid_plot
+ARIMA_lake$resid_plot
+ARIMA_catch$resid_plot
+ARIMA_lake_catch$resid_plot
+
+ARIMA_lagonly$model
+ARIMA_lake$model
+ARIMA_catch$model
+ARIMA_lake_catch$model
+
+
+```
+
+---
+
+## 30-Day Forecast Function
+
+`refit(..., reestimate = FALSE)` feeds the observed history up to the reference date
+through the fixed ARIMA model to update the internal state (last residuals, differenced
+values). Parameters (AR/MA coefficients, regression coefficients) are unchanged.
+
+`forecast()` then projects 30 days forward. For covariate models, observed covariate
+values for the forecast period are supplied via `new_data` (perfect covariate assumption).
+
+```{r fn-forecast}
+# # inputs to test function
+# forecast_date <- ymd("2024-01-01")
+# model_obj <- ARIMA_lake_catch
+# all_data <- ar_df
+# target  = "fDOM_1_QSU_daily"
+# horizon = 30
+
+forecast_fdom_30day <- function(forecast_date,
+                                 model_obj,
+                                 all_data,
+                                 target  = "fDOM_1_QSU_daily",
+                                 horizon = 30) {
+
+  covariates <- model_obj$covariates
+  col_select <- c(target, covariates)
+
+  # Check observed fDOM exists on reference date
+  curr_fdom <- all_data |>
+    filter(Date == forecast_date) |>
+    pull(!!sym(target))
+
+  if (length(curr_fdom) == 0 || is.na(curr_fdom)) return(NULL)
+
+  # Full observed history up to and including reference date
+  # (used to update ARIMA state — target + covariates both needed)
+  history_ts <- all_data |>
+    filter(Date <= forecast_date) |>
+    select(Date, all_of(col_select)) |>
+    arrange(Date) |>
+    tidyr::complete(Date = seq(min(Date), max(Date), by = "day")) |>
+    mutate(across(-Date, interpolate_ts)) |>
+    as_tsibble(index = Date)
+
+  # Update state with fixed parameters (no re-estimation)
+  model_updated <- model_obj$model |>
+    refit(new_data = history_ts, reestimate = FALSE)
+
+  # Forecast dates: day 1 through day 30 after reference date
+  forecast_dates <- seq(forecast_date + 1, forecast_date + horizon, by = "day")
+
+  # Generate forecast
+  if (!is.null(covariates)) {
+    # Provide observed covariate values for forecast period (perfect covariate assumption)
+    future_ts <- all_data |>
+      filter(Date %in% forecast_dates) |>
+      select(Date, all_of(covariates)) |>
+      arrange(Date) |>
+      tidyr::complete(Date = forecast_dates) |>
+      mutate(across(-Date, interpolate_ts)) |>
+      as_tsibble(index = Date)
+
+    if (nrow(future_ts) == 0) return(NULL)
+
+    fc <- forecast(model_updated, new_data = future_ts)
+  } else {
+    fc <- forecast(model_updated, h = horizon)
+  }
+
+  # Extract mean forecast and format to match all other model outputs
+  fc |>
+    as_tibble() |>
+    select(Date, .mean) |>
+    mutate(
+      model_id          = model_obj$model_name,
+      reference_date    = forecast_date,
+      Horizon           = as.integer(Date - forecast_date),
+      fDOM_1m_predicted = .mean
+    ) |>
+    select(model_id, reference_date, forecast_date = Date, Horizon, fDOM_1m_predicted) |>
+    filter(Horizon > 0)
+}
+
+# # test function
+# zz <- forecast_fdom_30day(forecast_date = ymd("2024-01-01"), model_obj = ARIMA_lake_catch,
+#                     all_data = ar_df, target = "fDOM_1_QSU_daily", horizon = 30)
+```
+
+---
+
+## Run Forecasts Across 2024
+
+```{r fn-loop}
+run_forecasts <- function(model_obj,
+                           all_data,
+                           pred_dates,
+                           target  = "fDOM_1_QSU_daily",
+                           horizon = 30) {
+
+  valid_dates <- all_data |>
+    filter(Date %in% pred_dates, !is.na(!!sym(target))) |>
+    pull(Date)
+
+  message(model_obj$model_name, " | forecasting ", length(valid_dates),
+          " reference dates...")
+
+  map_dfr(valid_dates, \(d) forecast_fdom_30day(
+    forecast_date = d,
+    model_obj     = model_obj,
+    all_data      = all_data,
+    target        = target,
+    horizon       = horizon
+  ))
+}
+```
+
+```{r run-forecasts}
+forecasts_arima1 <- run_forecasts(ARIMA_lagonly,    ar_df, pred_dates_2024)
+forecasts_arima2 <- run_forecasts(ARIMA_lake,       ar_df, pred_dates_2024)
+forecasts_arima3 <- run_forecasts(ARIMA_catch,      ar_df, pred_dates_2024)
+forecasts_arima4 <- run_forecasts(ARIMA_lake_catch, ar_df, pred_dates_2024)
+
+all_ARIMA_forecasts <- bind_rows(forecasts_arima1, forecasts_arima2,
+                                  forecasts_arima3, forecasts_arima4)
+
+glimpse(all_ARIMA_forecasts)
+```
+
+---
+
+## Save Output
+
+```{r save}
+write_csv(all_ARIMA_forecasts,
+          "../Data/ARIMA_forecasts_2024_24may26.csv")
+
+```
