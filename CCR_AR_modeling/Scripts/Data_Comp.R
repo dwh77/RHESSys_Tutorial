@@ -249,4 +249,66 @@ summary(export_df)
 
 #write.csv(export_df, "./CCR_AR_Modeling/Data/Daily_catwalk_RH_2021_2026.csv", row.names = F)
 
+##make plots
+driverdf <- read_csv("./CCR_AR_Modeling/Data/Daily_catwalk_RH_2021_2026.csv")
+
+driverdf |>
+  select(-fDOM_1m_lag1) |>
+  # filter(Date > ymd("2024-04-01")) |>
+  filter(Date > ymd("2021-08-19"), Date < ymd("2026-01-31")) |>
+  pivot_longer(-1) |>
+  ggplot(aes(x = Date, y = value))+
+  geom_point()+ facet_wrap(~name, scales = "free_y")+
+  theme_bw()
+
+
+driverdf |>
+  # filter(Date > ymd("2024-04-01")) |>
+  filter(Date > ymd("2021-08-19"), Date < ymd("2026-01-31")) |>
+  ggplot(aes(x = Date, y = fDOM_1_QSU_daily))+
+  geom_point()+
+  theme_bw()
+
+
+##monthly hydro
+driverdf |>
+  mutate(year = year(Date),
+         month_year = floor_date(Date, "month")) |>
+  filter(year > 2023) |>
+  ggplot(aes(x = factor(month_year), y = (RH_Q_m3day/86400))) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7, outlier.size = 1) +
+  geom_jitter(width = 0.2, size = 1.2, alpha = 0.5, color = "gray30") +
+  scale_x_discrete(labels = function(x) format(as.Date(x), "%b %Y")) +
+  labs(x = NULL, y = "RH Discharge (m³/sec)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+        text = element_text(size = 13))
+
+
+##monthly USGS
+USGS_daily <- dataRetrieval::readNWISdv(
+  siteNumbers = "02055100",
+  parameterCd = "00060",          # discharge in cfs
+  startDate = "2020-01-01",
+  endDate   = "2026-04-01"
+) |>  dataRetrieval::renameNWISColumns()
+
+#plot
+USGS_daily |>
+  mutate(year = year(Date),
+         month_year = floor_date(Date, "month")) |>
+  filter(year > 2023) |>
+  ggplot(aes(x = factor(month_year), y = (Flow/35.3))) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7, outlier.size = 1) +
+  geom_jitter(width = 0.2, size = 1.2, alpha = 0.5, color = "gray30") +
+  scale_x_discrete(labels = function(x) format(as.Date(x), "%b %Y")) +
+  scale_y_log10()+
+  labs(x = NULL, y = "USGS Tinker Discharge (cms)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+        text = element_text(size = 13))
+
+
+
+
 
