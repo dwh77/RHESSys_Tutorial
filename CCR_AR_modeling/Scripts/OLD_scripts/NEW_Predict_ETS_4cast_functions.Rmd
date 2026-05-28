@@ -1,0 +1,323 @@
+---
+title: "ETS fDOM Forecasting — Streamlined Workflow"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    theme: flatly
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 10,
+  fig.height = 5
+)
+```
+
+---
+
+## Packages and Data
+
+Uses `fable::ETS()` (Error, Trend, Seasonality exponential smoothing). ETS does not
+support external covariates, so the 4-model structure here reflects different ETS
+**specifications** rather than covariate sets (following Melofton et al.):
+
+| Model | Specification | Description |
+|---|---|---|
+| ETS_auto | `ETS(y)` | Fully automatic selection (AIC) |
+| ETS_SES | `error("A")` | Simple Exponential Smoothing |
+| ETS_Holt | `error("A") + trend("A")` | Holt's linear trend |
+| ETS_damped | `error("A") + trend("Ad")` | Damped trend |
+
+Forecasting uses `fabletools::refit(..., reestimate = FALSE)` to update the smoothing
+state (level, trend) to the reference date without changing the smoothing parameters —
+giving the same fit-once structure as all other scripts.
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+library(fable)      # ETS()
+library(fabletools) # refit()
+library(tsibble)
+library(zoo)        # na.approx
+```
+
+```{r load-data}
+getwd()
+ar_df <- read_csv("../Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
+  mutate(Date = as.Date(Date)) |>
+  select(Date, fDOM_1_QSU_daily)   # ETS is univariate — no covariates needed
+
+# Training window: all data before 2024
+train_cutoff <- ymd("2024-01-01")
+
+# Prediction window: every day of 2024
+pred_dates_2024 <- seq(ymd("2024-01-01"), ymd("2024-12-31"), by = "day")
+```
+
+---
+
+## Helper: Interpolate NAs
+
+```{r fn-interpolate}
+interpolate_ts <- function(x) {
+  if (all(is.na(x))) return(x)
+  zoo::na.approx(x, na.rm = FALSE, rule = 2)
+}
+```
+
+---
+
+## Model Fitting
+
+### Fitting function
+
+`ets_spec`: right-hand side of the ETS formula as a string
+(e.g. `"error('A') + trend('Ad') + season('N')"`) or `NULL` for fully automatic selection.
+
+Season is fixed to `"N"` (none) for all explicit specs — daily water quality data
+at sub-annual scale does not warrant a seasonal ETS component here.
+
+Returns the fitted mable, training plot, and metadata.
+
+```{r fn-fit}
+fit_ets_model <- function(all_data,
+                           train_cutoff,
+                           target,
+                           ets_spec   = NULL,
+                           model_name,
+                           seed       = 100) {
+
+  set.seed(seed)
+
+  train_df <- all_data |>
+    filter(Date < train_cutoff) |>
+    select(Date, all_of(target)) |>
+    arrange(Date) |>
+    tidyr::complete(Date = seq(min(Date), max(Date), by = "day")) |>
+    mutate(across(-Date, interpolate_ts))
+
+  train_ts <- as_tsibble(train_df, index = Date)
+
+  message(model_name, " | n_train = ", nrow(train_df))
+
+  # Fit ETS — NULL spec uses full auto-selection; otherwise RHS spec is injected
+  if (is.null(ets_spec)) {
+    ets_fit <- train_ts |>
+      model(ets = fable::ETS(!!sym(target)))
+  } else {
+    formula_obj <- as.formula(paste(target, "~", ets_spec))
+    ets_fit <- train_ts |>
+      model(ets = fable::ETS(formula = formula_obj))
+  }
+
+  # Report selected ETS components
+  message(model_name, " | ", capture.output(report(ets_fit))[1])
+
+  # In-sample fitted values
+  fitted_vals <- fitted(ets_fit) |>
+    as_tibble() |>
+    select(Date, .fitted)
+
+  train_df_plot <- train_df |>
+    left_join(fitted_vals, by = "Date")
+
+  train_rmse <- sqrt(mean((train_df_plot[[target]] - train_df_plot$.fitted)^2,
+                           na.rm = TRUE))
+
+  # Training plot: observed vs fitted timeseries
+  p_fit <- ggplot(train_df_plot) +
+    geom_point(aes(x = Date, y = !!sym(target), color = "Observed"),
+               size = 1.2, alpha = 0.8) +
+    geom_point(aes(x = Date, y = .fitted, color = "ETS fitted"),
+               size = 1.2, alpha = 0.8) +
+    scale_color_manual(values = c("Observed" = "black", "ETS fitted" = "dodgerblue"),
+                       breaks = c("Observed", "ETS fitted")) +
+    labs(title = paste0(model_name, " — training fit (pre-", year(train_cutoff), ")",
+                        "  |  RMSE = ", round(train_rmse, 2), " QSU"),
+         x = "Date", y = "fDOM (QSU)", color = NULL) +
+    theme_bw() +
+    theme(legend.position = "top")
+
+  list(
+    model      = ets_fit,
+    plot       = p_fit,
+    model_name = model_name,
+    target     = target,
+    covariates = NULL,       # ETS is always univariate
+    train_rmse = train_rmse
+  )
+}
+```
+
+### Fit 4 models
+
+```{r fit-models}
+# ETS1: fully automatic selection
+ETS_auto <- fit_ets_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  ets_spec     = NULL,
+  model_name   = "ETS_auto"
+)
+
+# ETS2: Simple Exponential Smoothing (level only, additive error)
+ETS_SES <- fit_ets_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  ets_spec     = "error('A') + trend('N') + season('N')",
+  model_name   = "ETS_SES"
+)
+
+# ETS3: Holt's linear trend (additive error + additive trend)
+ETS_Holt <- fit_ets_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  ets_spec     = "error('A') + trend('A') + season('N')",
+  model_name   = "ETS_Holt"
+)
+
+# ETS4: Damped trend (Melofton et al. approach)
+ETS_damped <- fit_ets_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  ets_spec     = "error('A') + trend('Ad') + season('N')",
+  model_name   = "ETS_damped"
+)
+```
+
+### Training plots
+
+```{r plot-training, fig.height=4}
+ETS_auto$plot
+ETS_SES$plot
+ETS_Holt$plot
+ETS_damped$plot
+```
+
+---
+
+## 30-Day Forecast Function
+
+`refit(..., reestimate = FALSE)` runs the observed history through the fixed ETS
+equations to update the state vector (level, trend) to the reference date. Smoothing
+parameters (α, β, φ) are unchanged from training.
+
+`forecast(h = 30)` then projects the updated state forward 30 days.
+
+```{r fn-forecast}
+# # inputs to test function
+# forecast_date <- ymd("2024-01-01")
+# model_obj <- ETS_damped
+# all_data <- ar_df
+# target  = "fDOM_1_QSU_daily"
+# horizon = 30
+
+forecast_fdom_30day <- function(forecast_date,
+                                 model_obj,
+                                 all_data,
+                                 target  = "fDOM_1_QSU_daily",
+                                 horizon = 30) {
+
+  # Check observed fDOM exists on reference date
+  curr_fdom <- all_data |>
+    filter(Date == forecast_date) |>
+    pull(!!sym(target))
+
+  if (length(curr_fdom) == 0 || is.na(curr_fdom)) return(NULL)
+
+  # Full observed history up to and including reference date (for state update)
+  history_ts <- all_data |>
+    filter(Date <= forecast_date) |>
+    select(Date, all_of(target)) |>
+    arrange(Date) |>
+    tidyr::complete(Date = seq(min(Date), max(Date), by = "day")) |>
+    mutate(across(-Date, interpolate_ts)) |>
+    as_tsibble(index = Date)
+
+  # Update ETS state with fixed smoothing parameters (no re-estimation)
+  model_updated <- model_obj$model |>
+    refit(new_data = history_ts, reestimate = FALSE)
+
+  # Forecast 30 days ahead from updated state
+  fc <- forecast(model_updated, h = horizon)
+
+  # Extract mean forecast and format to match all other model outputs
+  fc |>
+    as_tibble() |>
+    select(Date, .mean) |>
+    mutate(
+      model_id          = model_obj$model_name,
+      reference_date    = forecast_date,
+      Horizon           = as.integer(Date - forecast_date),
+      fDOM_1m_predicted = .mean
+    ) |>
+    select(model_id, reference_date, forecast_date = Date, Horizon, fDOM_1m_predicted) |>
+    filter(Horizon > 0)
+}
+
+# # test function
+# zz <- forecast_fdom_30day(forecast_date = ymd("2024-01-01"), model_obj = ETS_damped,
+#                     all_data = ar_df, target = "fDOM_1_QSU_daily", horizon = 30)
+```
+
+---
+
+## Run Forecasts Across 2024
+
+```{r fn-loop}
+run_forecasts <- function(model_obj,
+                           all_data,
+                           pred_dates,
+                           target  = "fDOM_1_QSU_daily",
+                           horizon = 30) {
+
+  valid_dates <- all_data |>
+    filter(Date %in% pred_dates, !is.na(!!sym(target))) |>
+    pull(Date)
+
+  message(model_obj$model_name, " | forecasting ", length(valid_dates),
+          " reference dates...")
+
+  map_dfr(valid_dates, \(d) forecast_fdom_30day(
+    forecast_date = d,
+    model_obj     = model_obj,
+    all_data      = all_data,
+    target        = target,
+    horizon       = horizon
+  ))
+}
+```
+
+```{r run-forecasts}
+forecasts_ets1 <- run_forecasts(ETS_auto,   ar_df, pred_dates_2024)
+forecasts_ets2 <- run_forecasts(ETS_SES,    ar_df, pred_dates_2024)
+forecasts_ets3 <- run_forecasts(ETS_Holt,   ar_df, pred_dates_2024)
+forecasts_ets4 <- run_forecasts(ETS_damped, ar_df, pred_dates_2024)
+
+all_ETS_forecasts <- bind_rows(forecasts_ets1, forecasts_ets2,
+                                forecasts_ets3, forecasts_ets4)
+
+glimpse(all_ETS_forecasts)
+```
+
+---
+
+## Save Output
+
+```{r save}
+write_csv(all_ETS_forecasts,
+          "../Data/ETS_forecasts_2024.csv")
+
+message("Saved ", nrow(all_ETS_forecasts), " forecast rows across ",
+        n_distinct(all_ETS_forecasts$model_id), " models.")
+```

@@ -1,0 +1,365 @@
+---
+title: "Prophet fDOM Forecasting — Streamlined Workflow"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    theme: flatly
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 10,
+  fig.height = 5
+)
+```
+
+---
+
+## Packages and Data
+
+Uses Meta's `prophet` package. Prophet decomposes the time series into trend +
+weekly + yearly seasonality components. External covariates are added as additive
+regressors (Melofton et al. approach).
+
+Prophet is the **cleanest fit-once model** in this workflow — no state update or
+`refit()` is needed. `predict(model, future_df)` accepts any set of future dates
+directly, so forecasting from any 2024 reference date is just one `predict()` call
+with the 30 future dates.
+
+Prophet requires the target column to be named `y` and the date column `ds`.
+These are renamed internally — the rest of the script uses the same conventions
+as all other models.
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+library(prophet)
+library(zoo)        # na.approx for covariate gap-filling
+```
+
+```{r load-data}
+getwd()
+ar_df <- read_csv("../Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
+  mutate(Date = as.Date(Date)) |>
+  select(Date, fDOM_1_QSU_daily,
+         Temp_1_C_daily, DOsat_1_pct_daily, Chla_1_ugL_daily,
+         RH_Q_m3day, RH_DOC_mgL)
+
+# Training window: all data before 2024
+train_cutoff <- ymd("2024-01-01")
+
+# Prediction window: every day of 2024
+pred_dates_2024 <- seq(ymd("2024-01-01"), ymd("2024-12-31"), by = "day")
+```
+
+---
+
+## Helper: Interpolate NAs
+
+Used to fill covariate gaps before fitting and before forecast-step covariate lookup.
+
+```{r fn-interpolate}
+interpolate_ts <- function(x) {
+  if (all(is.na(x))) return(x)
+  zoo::na.approx(x, na.rm = FALSE, rule = 2)
+}
+```
+
+---
+
+## Model Fitting
+
+### Fitting function
+
+Fits a Prophet model on data before `train_cutoff` following Melofton et al.:
+
+- Linear growth
+- Yearly + weekly seasonality (additive)
+- No daily seasonality
+- External covariates as additive regressors (when supplied)
+- `mcmc.samples = 0`, `uncertainty.samples = 0` — point estimates only (fast)
+
+Returns the fitted model, a training plot, a components decomposition plot
+(trend + seasonality), and metadata for forecasting.
+
+```{r fn-fit}
+fit_prophet_model <- function(all_data,
+                               train_cutoff,
+                               target,
+                               covariates  = NULL,
+                               model_name,
+                               seed        = 100) {
+
+  set.seed(seed)
+
+  col_select <- c(target, covariates)
+
+  # Build training data — interpolate covariate NAs, then drop remaining NAs
+  # Prophet requires ds (date) and y (target) column names
+  train_df <- all_data |>
+    filter(Date < train_cutoff) |>
+    select(Date, all_of(col_select)) |>
+    arrange(Date) |>
+    mutate(across(-Date, interpolate_ts)) |>
+    na.omit() |>
+    rename(ds = Date, y = !!sym(target))
+
+  message(model_name, " | n_train = ", nrow(train_df))
+
+  # Initialize Prophet model (Melofton et al. specification)
+  m <- prophet(
+    growth               = "linear",
+    fit                  = FALSE,
+    yearly.seasonality   = TRUE,
+    weekly.seasonality   = TRUE,
+    daily.seasonality    = FALSE,
+    seasonality.mode     = "additive",
+    mcmc.samples         = 0,
+    uncertainty.samples  = 0
+  )
+
+  # Add external regressors (additive mode, auto-standardized)
+  if (!is.null(covariates)) {
+    for (cv in covariates) {
+      m <- add_regressor(m, name = cv, standardize = "auto", mode = "additive")
+    }
+  }
+
+  # Fit model
+  m <- fit.prophet(m = m, df = train_df)
+
+  # In-sample fitted values — predict() on training dates (drop y, keep ds + covariates)
+  train_pred_df <- train_df |> select(-y)
+  fitted_vals   <- predict(m, train_pred_df)
+
+  train_df_plot <- train_df |>
+    mutate(fitted = fitted_vals$yhat)
+
+  train_rmse <- sqrt(mean((train_df_plot$y - train_df_plot$fitted)^2, na.rm = TRUE))
+
+  # Training plot: observed vs fitted timeseries
+  p_fit <- ggplot(train_df_plot) +
+    geom_point(aes(x = ds, y = y, color = "Observed"),
+               size = 1.2, alpha = 0.8) +
+    geom_point(aes(x = ds, y = fitted, color = "Prophet fitted"),
+               size = 1.2, alpha = 0.8) +
+    scale_color_manual(values = c("Observed" = "black", "Prophet fitted" = "dodgerblue"),
+                       breaks = c("Observed", "Prophet fitted")) +
+    labs(title = paste0(model_name, " — training fit (pre-", year(train_cutoff), ")",
+                        "  |  RMSE = ", round(train_rmse, 2), " QSU"),
+         x = "Date", y = "fDOM (QSU)", color = NULL) +
+    theme_bw() +
+    theme(legend.position = "top")
+
+  # Components plot: trend + weekly + yearly seasonality decomposition
+  p_components <- prophet_plot_components(m, fitted_vals)
+
+  list(
+    model            = m,
+    plot             = p_fit,
+    components_plot  = p_components,
+    model_name       = model_name,
+    target           = target,
+    covariates       = covariates,
+    train_rmse       = train_rmse
+  )
+}
+```
+
+### Fit 4 models
+
+All models trained on data before `r train_cutoff`. Prophet's trend and seasonality
+parameters are fixed here and reused for all 2024 forecasts — no state update needed.
+
+```{r fit-models}
+# Prophet1: trend + seasonality only (no external regressors)
+Prophet_lagonly <- fit_prophet_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  covariates   = NULL,
+  model_name   = "Prophet_lag_only"
+)
+
+# Prophet2: + in-lake (Temp, DO, Chla)
+Prophet_lake <- fit_prophet_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily"),
+  model_name   = "Prophet_lag_lake"
+)
+
+# Prophet3: + catchment (RH discharge and DOC)
+Prophet_catch <- fit_prophet_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  covariates   = c("RH_Q_m3day", "RH_DOC_mgL"),
+  model_name   = "Prophet_lag_catchment"
+)
+
+# Prophet4: + in-lake + catchment
+Prophet_lake_catch <- fit_prophet_model(
+  all_data     = ar_df,
+  train_cutoff = train_cutoff,
+  target       = "fDOM_1_QSU_daily",
+  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily",
+                   "RH_Q_m3day", "RH_DOC_mgL"),
+  model_name   = "Prophet_lag_lake_catchment"
+)
+```
+
+### Training plots
+
+```{r plot-training, fig.height=4}
+Prophet_lagonly$plot
+Prophet_lake$plot
+Prophet_catch$plot
+Prophet_lake_catch$plot
+```
+
+### Components plots
+
+Trend + weekly + yearly seasonality decomposition for each model.
+
+```{r plot-components, fig.height=6}
+Prophet_lagonly$components_plot
+Prophet_lake$components_plot
+Prophet_catch$components_plot
+Prophet_lake_catch$components_plot
+```
+
+---
+
+## 30-Day Forecast Function
+
+Prophet is the simplest forecast function in this workflow — no for-loop, no state
+update, no `refit()`. `predict(model, future_df)` accepts any future dates directly.
+
+For covariate models, observed covariate values for the 30 forecast days are joined
+to the future dataframe (perfect covariate assumption, same as all other scripts).
+The `yhat` column from `predict()` is returned as `fDOM_1m_predicted`.
+
+```{r fn-forecast}
+# # inputs to test function
+# forecast_date <- ymd("2024-01-01")
+# model_obj <- Prophet_lake_catch
+# all_data <- ar_df
+# target  = "fDOM_1_QSU_daily"
+# horizon = 30
+
+forecast_fdom_30day <- function(forecast_date,
+                                 model_obj,
+                                 all_data,
+                                 target  = "fDOM_1_QSU_daily",
+                                 horizon = 30) {
+
+  covariates <- model_obj$covariates
+
+  # Check observed fDOM exists on reference date
+  curr_fdom <- all_data |>
+    filter(Date == forecast_date) |>
+    pull(!!sym(target))
+
+  if (length(curr_fdom) == 0 || is.na(curr_fdom)) return(NULL)
+
+  # Forecast dates: day 1 through day 30 after reference date
+  forecast_dates <- seq(forecast_date + 1, forecast_date + horizon, by = "day")
+
+  # Build future dataframe — Prophet requires ds column
+  future_df <- tibble(ds = forecast_dates)
+
+  # Add observed covariate values for forecast period (perfect covariate assumption)
+  if (!is.null(covariates)) {
+    covar_future <- all_data |>
+      filter(Date %in% forecast_dates) |>
+      select(Date, all_of(covariates)) |>
+      arrange(Date) |>
+      tidyr::complete(Date = forecast_dates) |>
+      mutate(across(-Date, interpolate_ts)) |>
+      rename(ds = Date)
+
+    future_df <- future_df |>
+      left_join(covar_future, by = "ds")
+
+    if (any(is.na(future_df |> select(-ds)))) {
+      future_df <- future_df |>
+        mutate(across(-ds, interpolate_ts))
+    }
+  }
+
+  # Generate forecast — single predict() call, no looping needed
+  fc <- predict(model_obj$model, future_df)
+
+  tibble(Date = as.Date(fc$ds), fDOM_1m_predicted = fc$yhat) |>
+    mutate(
+      model_id       = model_obj$model_name,
+      reference_date = forecast_date,
+      Horizon        = as.integer(Date - forecast_date)
+    ) |>
+    select(model_id, reference_date, forecast_date = Date, Horizon, fDOM_1m_predicted) |>
+    filter(Horizon > 0)
+}
+
+# # test function
+# zz <- forecast_fdom_30day(forecast_date = ymd("2024-01-01"), model_obj = Prophet_lake_catch,
+#                     all_data = ar_df, target = "fDOM_1_QSU_daily", horizon = 30)
+```
+
+---
+
+## Run Forecasts Across 2024
+
+```{r fn-loop}
+run_forecasts <- function(model_obj,
+                           all_data,
+                           pred_dates,
+                           target  = "fDOM_1_QSU_daily",
+                           horizon = 30) {
+
+  valid_dates <- all_data |>
+    filter(Date %in% pred_dates, !is.na(!!sym(target))) |>
+    pull(Date)
+
+  message(model_obj$model_name, " | forecasting ", length(valid_dates),
+          " reference dates...")
+
+  map_dfr(valid_dates, \(d) forecast_fdom_30day(
+    forecast_date = d,
+    model_obj     = model_obj,
+    all_data      = all_data,
+    target        = target,
+    horizon       = horizon
+  ))
+}
+```
+
+```{r run-forecasts}
+forecasts_prophet1 <- run_forecasts(Prophet_lagonly,    ar_df, pred_dates_2024)
+forecasts_prophet2 <- run_forecasts(Prophet_lake,       ar_df, pred_dates_2024)
+forecasts_prophet3 <- run_forecasts(Prophet_catch,      ar_df, pred_dates_2024)
+forecasts_prophet4 <- run_forecasts(Prophet_lake_catch, ar_df, pred_dates_2024)
+
+all_Prophet_forecasts <- bind_rows(forecasts_prophet1, forecasts_prophet2,
+                                    forecasts_prophet3, forecasts_prophet4)
+
+glimpse(all_Prophet_forecasts)
+```
+
+---
+
+## Save Output
+
+```{r save}
+write_csv(all_Prophet_forecasts,
+          "../Data/Prophet_forecasts_2024_25may26.csv")
+
+
+```
