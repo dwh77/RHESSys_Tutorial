@@ -12,8 +12,8 @@ date: "`r Sys.Date()`"
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
   echo    = TRUE,
-  message = FALSE,
-  warning = FALSE,
+  message = T,
+  warning = T,
   fig.width  = 10,
   fig.height = 5
 )
@@ -22,6 +22,11 @@ knitr::opts_chunk$set(
 ---
 
 ## Packages and Data
+
+Uses `tidymodels` / `parsnip` XGBoost following Melofton et al. Hyperparameters are
+tuned once on pre-2024 training data via 10-fold cross-validation and random search
+(`grid = 25`). The finalized workflow (fixed hyperparameters, no fitted weights) is
+stored and refit on all history up to each reference date in the forecast loop.
 
 ```{r packages}
 library(tidyverse)
@@ -33,77 +38,38 @@ tidymodels_prefer()
 
 ```{r load-data}
 getwd()
-ar_df <- read_csv("../Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
-  mutate(Date = as.Date(Date)) |>
-  select(Date, fDOM_1_QSU_daily, fDOM_1m_lag1,
-         Temp_1_C_daily, DOsat_1_pct_daily, Chla_1_ugL_daily,
-         RH_Q_m3day, RH_DOC_mgL)
+ar_df <- read_csv("../Data/Daily_catwalk_RH_2021_2026.csv")
 
 # Training window: all data before 2024
 train_cutoff <- ymd("2024-01-01")
 
-# Prediction window: every day of 2024
-pred_dates_2024 <- seq(ymd("2024-01-01"), ymd("2024-12-31"), by = "day")
+# Prediction window
+pred_dates <- seq(ymd("2024-01-01"), ymd("2025-12-31"), by = "day")
+```
+
+```{r interpolate-short-gaps}
+# Interpolate short gaps only (≤ 10 consecutive missing days) in target and all drivers.
+# Gaps longer than 10 days are left as NA — those reference dates will be skipped
+ar_df <- ar_df |>
+  mutate(across(-Date,
+                \(x) zoo::na.approx(x, maxgap = 10, na.rm = FALSE, rule = 2)))
 ```
 
 ---
 
 ## Model Fitting
 
-
-non function fit 
-
-```{r}
-set.seed(100)
-
-target     <- "fDOM_1_QSU_daily"
-lag_col    <- "fDOM_1m_lag1"
-covariates <- c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily",
-                "RH_Q_m3day", "RH_DOC_mgL")
-feature_cols <- c(lag_col, covariates)
-
-train_df_full <- ar_df |>
-  filter(Date < train_cutoff) |>
-  select(Date, all_of(c(target, feature_cols))) |>
-  na.omit()
-
-train_df <- train_df_full |> select(-Date)
-
-xgb_spec <- boost_tree(trees = 500, tree_depth = 4,
-                        learn_rate = 0.05, min_n = 10) |>
-  set_engine("xgboost") |>
-  set_mode("regression")
-
-xgb_wf <- workflow() |>
-  add_recipe(recipe(as.formula(paste(target, "~ .")), data = train_df)) |>
-  add_model(xgb_spec)
-
-xgb_fit <- xgb_wf |> fit(data = train_df)
-
-# check what we get from the engine
-xgb_engine <- extract_fit_engine(xgb_fit)
-class(xgb_engine)
-
-# try importance
-xgboost::xgb.importance(model = xgb_engine, feature_names = feature_cols)
-
-```
-
-
-
-
 ### Fitting function
 
-Fits an XGBoost model via parsnip (Melofton et al. approach) on data before
-`train_cutoff`. Hyperparameters are fixed: `trees = 500`, `tree_depth = 4`,
-`learn_rate = 0.05`, `min_n = 10` — tuning can be swapped in later.
+Fits XGBoost following Melofton et al.:
 
-The fitted object is a tidymodels `workflow_fit`, which keeps the preprocessing
-recipe and model together. `predict(workflow_fit, new_data = ...)` returns a
-tibble with a `.pred` column.
+- `mtry = 0.33` (33% of features sampled per split, `counts = FALSE`)
+- `trees = 1000`, `objective = "reg:squarederror"`
+- `min_n`, `tree_depth`, `learn_rate`, `loss_reduction`, `sample_size` tuned via
+  10-fold CV + random search (`grid = 25`)
 
-Returns the fitted workflow, metadata for forecasting, a training plot of
-observed vs fitted, and a variable importance plot.
+Returns the fitted workflow (for training plots / importance), the **finalized but
+unfitted workflow** (`final_wf`) used for refitting at each forecast date, and metadata.
 
 ```{r fn-fit}
 fit_xgb_model <- function(all_data,
@@ -112,53 +78,79 @@ fit_xgb_model <- function(all_data,
                             lag_col,
                             covariates = NULL,
                             model_name,
-                            trees      = 500,
-                            tree_depth = 4,
-                            learn_rate = 0.05,
-                            min_n      = 10,
+                            v_folds    = 10,
+                            grid_size  = 25,
                             seed       = 100) {
 
   set.seed(seed)
   feature_cols <- c(lag_col, covariates)
 
-  # Build training data — keep Date for plotting, drop it before fitting
-  train_df_full <- all_data |>
+  # Build training data — drop NAs in all model columns
+  train_df <- all_data |>
     filter(Date < train_cutoff) |>
-    select(Date, all_of(c(target, feature_cols))) |>
+    select(all_of(c(target, feature_cols))) |>
     na.omit()
-
-  train_df <- train_df_full |> select(-Date)
 
   message(model_name, " | n_train = ", nrow(train_df),
           " | p = ", length(feature_cols))
 
-  # Define model spec
+  # Cross-validation folds
+  folds <- vfold_cv(train_df, v = v_folds)
+
+  # XGBoost spec — mtry fixed as fraction, other hyperparameters tuned
   xgb_spec <- boost_tree(
-    trees      = trees,
-    tree_depth = tree_depth,
-    learn_rate = learn_rate,
-    min_n      = min_n
+    mtry          = 0.33,
+    trees         = 1000,
+    min_n         = tune(),
+    tree_depth    = tune(),
+    learn_rate    = tune(),
+    loss_reduction = tune(),
+    sample_size   = tune()
   ) |>
-    set_engine("xgboost") |>
+    set_engine("xgboost",
+               objective    = "reg:squarederror",
+               eval_metric  = "rmse",
+               counts       = FALSE) |>
     set_mode("regression")
 
-  # Build workflow with recipe + model, then fit
+  # Workflow with recipe
   xgb_wf <- workflow() |>
     add_recipe(recipe(as.formula(paste(target, "~ .")), data = train_df)) |>
     add_model(xgb_spec)
 
-  xgb_fit <- xgb_wf |> fit(data = train_df)
+  # Tune hyperparameters
+  message(model_name, " | tuning hyperparameters (", v_folds, "-fold CV, grid = ",
+          grid_size, ")...")
 
-  # In-sample fitted values
-  train_df_full <- train_df_full |>
-    mutate(fitted = predict(xgb_fit, new_data = train_df)$.pred)
+  xgb_tune <- xgb_wf |>
+    tune_grid(
+      resamples = folds,
+      grid      = grid_size,
+      control   = control_grid(save_pred = TRUE),
+      metrics   = metric_set(rmse)
+    )
 
-  # Training RMSE
-  train_rmse <- sqrt(mean((train_df_full[[target]] - train_df_full$fitted)^2,
+  best_params <- select_best(xgb_tune, metric = "rmse")
+  message(model_name, " | best params selected")
+
+  # Finalize workflow with best hyperparameters
+  final_wf <- xgb_wf |> finalize_workflow(best_params)
+
+  # Fit finalized workflow on full training data
+  xgb_fit <- final_wf |> fit(data = train_df)
+
+  # In-sample fitted values (need Date for plotting — join back)
+  train_df_plot <- all_data |>
+    filter(Date < train_cutoff) |>
+    select(Date, all_of(c(target, feature_cols))) |>
+    na.omit() |>
+    mutate(fitted = predict(xgb_fit, new_data = select(cur_data(), all_of(feature_cols)))$.pred)
+
+  train_rmse <- sqrt(mean((train_df_plot[[target]] - train_df_plot$fitted)^2,
                            na.rm = TRUE))
 
-  # Training plot: observed vs fitted timeseries
-  p_fit <- ggplot(train_df_full) +
+  # Training plot
+  p_fit <- ggplot(train_df_plot) +
     geom_point(aes(x = Date, y = !!sym(target), color = "Observed"),
                size = 1.2, alpha = 0.8) +
     geom_point(aes(x = Date, y = fitted, color = "XGB fitted"),
@@ -171,8 +163,7 @@ fit_xgb_model <- function(all_data,
     theme_bw() +
     theme(legend.position = "top")
 
-  # Variable importance — extract raw xgboost engine and use xgb.importance directly
-  # (bypasses vip/parsnip wrapper that triggers a JSON casting bug in newer xgboost)
+  # Variable importance
   xgb_engine <- extract_fit_engine(xgb_fit)
   imp_df <- xgboost::xgb.importance(model = xgb_engine,
                                      feature_names = feature_cols) |>
@@ -188,13 +179,16 @@ fit_xgb_model <- function(all_data,
     theme(text = element_text(size = 12))
 
   list(
-    model          = xgb_fit,
+    model          = xgb_fit,     # fitted on pre-2024 training data (for plots)
+    final_wf       = final_wf,    # finalized workflow — refit on expanding history in forecast loop
+    best_params    = best_params,
     plot           = p_fit,
     importance_plot = p_imp,
     model_name     = model_name,
     target         = target,
     lag_col        = lag_col,
     covariates     = covariates,
+    feature_cols   = feature_cols,
     train_rmse     = train_rmse
   )
 }
@@ -202,26 +196,14 @@ fit_xgb_model <- function(all_data,
 
 ### Fit 4 models
 
-All models trained on data before `r train_cutoff`.
-
 ```{r fit-models}
-# # XGB1: lag only
-# XGB_lagonly <- fit_xgb_model(
-#   all_data     = ar_df,
-#   train_cutoff = train_cutoff,
-#   target       = "fDOM_1_QSU_daily",
-#   lag_col      = "fDOM_1m_lag1",
-#   covariates   = NULL,
-#   model_name   = "XGB_lag_only"
-# )
-
-# XGB2: lag + in-lake (Temp, DO, Chla)
+# XGB2: lag + in-lake (Diff_Dens, DO, Chla)
 XGB_lake <- fit_xgb_model(
   all_data     = ar_df,
   train_cutoff = train_cutoff,
   target       = "fDOM_1_QSU_daily",
   lag_col      = "fDOM_1m_lag1",
-  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily"),
+  covariates   = c("Diff_Dens_1_max", "DOsat_1_pct_daily", "Chla_1_ugL_daily"),
   model_name   = "XGB_lag_lake"
 )
 
@@ -241,7 +223,7 @@ XGB_lake_catch <- fit_xgb_model(
   train_cutoff = train_cutoff,
   target       = "fDOM_1_QSU_daily",
   lag_col      = "fDOM_1m_lag1",
-  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily",
+  covariates   = c("Diff_Dens_1_max", "DOsat_1_pct_daily", "Chla_1_ugL_daily",
                    "RH_Q_m3day", "RH_DOC_mgL"),
   model_name   = "XGB_lag_lake_catchment"
 )
@@ -250,7 +232,6 @@ XGB_lake_catch <- fit_xgb_model(
 ### Training plots
 
 ```{r plot-training, fig.height=4}
-# XGB_lagonly$plot
 XGB_lake$plot
 XGB_catch$plot
 XGB_lake_catch$plot
@@ -259,7 +240,6 @@ XGB_lake_catch$plot
 ### Variable importance plots
 
 ```{r plot-importance, fig.height=4}
-# XGB_lagonly$importance_plot
 XGB_lake$importance_plot
 XGB_catch$importance_plot
 XGB_lake_catch$importance_plot
@@ -269,9 +249,12 @@ XGB_lake_catch$importance_plot
 
 ## 30-Day Forecast Function
 
-Same structure as the AR and RF versions. The only difference is that parsnip's
-`predict()` takes `new_data` (not `newdata`) and returns a tibble — `.pred` is
-extracted rather than wrapping in `as.numeric()`.
+Hyperparameters are fixed from the initial tuning step. At each reference date,
+`model_obj$final_wf` (the finalized but unfitted workflow) is refit on all history
+up to that date — coefficients/weights update as data accumulates, structure stays fixed.
+
+The iterated 30-day for-loop propagates predicted fDOM as the lag for each next step,
+with observed covariate values at each step (perfect covariate assumption).
 
 ```{r fn-forecast}
 # # inputs to test function
@@ -287,76 +270,69 @@ forecast_fdom_30day <- function(forecast_date,
                                  target  = "fDOM_1_QSU_daily",
                                  horizon = 30) {
 
-  lag_col    <- model_obj$lag_col
-  covariates <- model_obj$covariates
-  model      <- model_obj$model
+  lag_col      <- model_obj$lag_col
+  covariates   <- model_obj$covariates
+  feature_cols <- model_obj$feature_cols
 
-  # Seed: extracted BEFORE masking — reference date observation is valid IC
+  # Seed: observed fDOM on the reference date
   curr_fdom <- all_data |>
     filter(Date == forecast_date) |>
     pull(!!sym(target))
 
   if (length(curr_fdom) == 0 || is.na(curr_fdom)) return(NULL)
 
-  # Mask future fDOM — prevents any observed or lagged fDOM on/after forecast_date
-  # from being accessible during the forecast loop
-  all_data <- all_data |>
-    mutate(
-      !!sym(target)  := if_else(Date >= forecast_date, NA_real_, !!sym(target)),
-      !!sym(lag_col) := if_else(Date >  forecast_date, NA_real_, !!sym(lag_col))
-    )
+  # Refit on all history up to (not including) reference date
+  # Uses finalized workflow with fixed hyperparameters — no re-tuning
+  history_df <- all_data |>
+    filter(Date < forecast_date) |>
+    select(all_of(c(target, feature_cols))) |>
+    na.omit()
 
-  # Sequence of dates: reference date through 30 days ahead
-  forecast_dates <- seq(from = forecast_date,
-                        to   = forecast_date + horizon,
-                        by   = "day")
+  model <- model_obj$final_wf |> fit(data = history_df)
 
-  # Pre-allocate forecast dataframe
-  forecast_df <- tibble(
-    model_id          = model_obj$model_name,
-    reference_date    = forecast_date,
-    forecast_date     = forecast_dates,
-    Horizon           = as.integer(forecast_dates - reference_date),
-    fDOM_1m_predicted = as.double(NA)
-  )
+  # Forecast dates: day 1 through day 30 after reference date
+  forecast_dates <- seq(forecast_date + 1, forecast_date + horizon, by = "day")
 
-  # Seed horizon 0 with the observed value (used as lag for step 1)
-  forecast_df$fDOM_1m_predicted[1] <- curr_fdom
+  # Build full drivers dataframe upfront — observed covariates for all forecast days
+  # (Melofton et al. approach: fill all covariate rows first, update lag iteratively)
+  drivers <- all_data |>
+    filter(Date %in% forecast_dates) |>
+    select(Date, all_of(feature_cols)) |>
+    arrange(Date)
 
-  # Step forward one day at a time
-  for (i in 2:length(forecast_dates)) {
+  if (nrow(drivers) == 0) return(NULL)
 
-    # Lag: prior step's prediction pulled from the forecast dataframe
-    fdom_lag <- forecast_df$fDOM_1m_predicted[i - 1]
+  # Seed the lag column: first forecast step uses observed fDOM on reference date
+  # drivers[[lag_col]][1] <- curr_fdom
 
-    # Covariates: observed values for this forecast date
-    fc_row <- all_data |> filter(Date == forecast_dates[i])
-    if (nrow(fc_row) == 0) next
-
-    # Assemble newdata for predict() — parsnip requires a tibble via new_data
-    newdata <- setNames(tibble(fdom_lag), lag_col)
-    if (!is.null(covariates)) {
-      for (cv in covariates) newdata[[cv]] <- fc_row[[cv]]
+  # Step forward one day at a time — only the lag column is updated each step
+  pred_vals <- numeric(nrow(drivers))
+  for (h in 1:nrow(drivers)) {
+    temp_pred <- predict(model, new_data = drivers[h, feature_cols])$.pred
+    pred_vals[h] <- temp_pred
+    if (h < nrow(drivers)) {
+      drivers[[lag_col]][h + 1] <- temp_pred
     }
-
-    # parsnip predict returns a tibble; extract .pred
-    forecast_df$fDOM_1m_predicted[i] <- predict(model, new_data = newdata)$.pred
   }
 
-  # Return only the 30 forecast days (drop horizon 0 seed row)
-  forecast_df |> filter(Horizon > 0)
-} # end function
+  tibble(
+    model_id          = model_obj$model_name,
+    reference_date    = forecast_date,
+    forecast_date     = drivers$Date,
+    Horizon           = as.integer(drivers$Date - reference_date),
+    fDOM_1m_predicted = pred_vals
+  )
+}
 
 # # test function
-# zz <- forecast_fdom_30day(forecast_date = ymd("2024-01-01"), model_obj = XGB_lake_catch,
+# zz <- forecast_fdom_30day(forecast_date = ymd("2025-01-01"), model_obj = XGB_lake_catch,
 #                     all_data = ar_df, target = "fDOM_1_QSU_daily", horizon = 30)
+
 ```
 
 ---
 
-## Run Forecasts Across 2024
-
-Identical to the AR and RF versions.
+## Run Forecasts
 
 ```{r fn-loop}
 run_forecasts <- function(model_obj,
@@ -365,7 +341,6 @@ run_forecasts <- function(model_obj,
                            target  = "fDOM_1_QSU_daily",
                            horizon = 30) {
 
-  # Keep only dates with an observed target value (needed to seed the lag)
   valid_dates <- all_data |>
     filter(Date %in% pred_dates, !is.na(!!sym(target))) |>
     pull(Date)
@@ -373,26 +348,25 @@ run_forecasts <- function(model_obj,
   message(model_obj$model_name, " | forecasting ", length(valid_dates),
           " reference dates...")
 
-  map_dfr(valid_dates, \(d) forecast_fdom_30day(
-    forecast_date = d,
-    model_obj     = model_obj,
-    all_data      = all_data,
-    target        = target,
-    horizon       = horizon
-  ))
+  map_dfr(valid_dates, \(d) {
+    cat("  -> starting forecast for ", format(d), "\n")
+    forecast_fdom_30day(
+      forecast_date = d,
+      model_obj     = model_obj,
+      all_data      = all_data,
+      target        = target,
+      horizon       = horizon
+    )
+  })
 }
 ```
 
 ```{r run-forecasts}
-# forecasts_xgb1 <- run_forecasts(XGB_lagonly,    ar_df, pred_dates_2024)
-forecasts_xgb2 <- run_forecasts(XGB_lake,       ar_df, pred_dates_2024)
-forecasts_xgb3 <- run_forecasts(XGB_catch,      ar_df, pred_dates_2024)
-forecasts_xgb4 <- run_forecasts(XGB_lake_catch, ar_df, pred_dates_2024)
+forecasts_xgb2 <- run_forecasts(XGB_lake,       ar_df, pred_dates)
+forecasts_xgb3 <- run_forecasts(XGB_catch,      ar_df, pred_dates)
+forecasts_xgb4 <- run_forecasts(XGB_lake_catch, ar_df, pred_dates)
 
-# Combine all models into one dataframe
-all_XGB_forecasts <- bind_rows(#forecasts_xgb1, 
-                                forecasts_xgb2,
-                                forecasts_xgb3, forecasts_xgb4)
+all_XGB_forecasts <- bind_rows(forecasts_xgb2, forecasts_xgb3, forecasts_xgb4)
 
 glimpse(all_XGB_forecasts)
 ```
@@ -403,6 +377,7 @@ glimpse(all_XGB_forecasts)
 
 ```{r save}
 write_csv(all_XGB_forecasts,
-          "../Data/XGB_forecasts_2024_24may26.csv")
+          "../Data/XGB_forecasts_2024-2025_27may26.csv")
+
 
 ```

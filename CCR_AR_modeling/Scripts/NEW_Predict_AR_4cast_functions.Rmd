@@ -12,8 +12,8 @@ date: "`r Sys.Date()`"
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
   echo    = TRUE,
-  message = FALSE,
-  warning = FALSE,
+  message = T,
+  warning = T,
   fig.width  = 10,
   fig.height = 5
 )
@@ -30,21 +30,27 @@ library(lubridate)
 
 ```{r load-data}
 getwd()
-ar_df <- read_csv("../Data/Daily_catwalk_met_RH_2021_2025_lagZS.csv") |>
-  mutate(Date = as.Date(Date)) |> 
-  select(Date, fDOM_1_QSU_daily, fDOM_1m_lag1, 
-         Temp_1_C_daily, DOsat_1_pct_daily, Chla_1_ugL_daily,
-         RH_Q_m3day, RH_DOC_mgL)
+ar_df <- read_csv("../Data/Daily_catwalk_RH_2021_2026.csv") 
+
 
 # Training window: all data before 2024
 train_cutoff <- ymd("2024-01-01")
 
 # Prediction window: every day of 2024
-pred_dates_2024 <- seq(ymd("2024-01-01"), ymd("2024-12-31"), by = "day")
+pred_dates <- seq(ymd("2024-01-01"), ymd("2025-12-31"), by = "day")
 
 ```
 
----
+
+```{r interpolate-short-gaps}
+# Interpolate short gaps only (≤ 10 consecutive missing days) in target and all drivers.
+# Gaps longer than 10 days are left as NA — those reference dates will be skipped
+ar_df <- ar_df |>
+  mutate(across(-Date,
+                \(x) zoo::na.approx(x, maxgap = 10, na.rm = FALSE, rule = 2)))
+
+```
+
 
 ## Model Fitting
 
@@ -126,7 +132,7 @@ AR_lake <- fit_ar_glm(
   train_cutoff = train_cutoff,
   target       = "fDOM_1_QSU_daily",
   lag_col      = "fDOM_1m_lag1",
-  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily"),
+  covariates   = c("Diff_Dens_1_max", "DOsat_1_pct_daily", "Chla_1_ugL_daily"),
   model_name   = "AR_lag_lake"
 )
 
@@ -146,7 +152,7 @@ AR_lake_catch <- fit_ar_glm(
   train_cutoff = train_cutoff,
   target       = "fDOM_1_QSU_daily",
   lag_col      = "fDOM_1m_lag1",
-  covariates   = c("Temp_1_C_daily", "DOsat_1_pct_daily", "Chla_1_ugL_daily",
+  covariates   = c("Diff_Dens_1_max", "DOsat_1_pct_daily", "Chla_1_ugL_daily",
                    "RH_Q_m3day", "RH_DOC_mgL"),
   model_name   = "AR_lag_lake_catchment"
 )
@@ -164,10 +170,10 @@ AR_lake_catch$plot
 ```
 
 AIC
-Thing to check: that training data is same for all models (incase of weird NA missing a few for one co-var)
+
 ```{r}
 
-AIC(m1_1m$model, m2b_1m$model, m4b_1m$model,  m5_1m$model)
+AIC(AR_lagonly$model, AR_lake$model, AR_catch$model,  AR_lake_catch$model)
 
 ```
 
@@ -184,8 +190,8 @@ sequentially with the lag pulled from the prior row's prediction.
 Observed covariate values are used at each forecast step (perfect covariate assumption).
 
 ```{r fn-forecast}
-# #inputs to test function
-# forecast_date <- ymd("2024-01-01")
+# # #inputs to test function
+# forecast_date <- ymd("2025-01-01")
 # model_obj <- AR_lake_catch
 # all_data <- ar_df
 # target  = "fDOM_1_QSU_daily"
@@ -200,7 +206,6 @@ forecast_fdom_30day <- function(forecast_date,
 
   lag_col    <- model_obj$lag_col
   covariates <- model_obj$covariates
-  model      <- model_obj$model
 
   # Seed: observed fDOM on the reference date
   curr_fdom <- all_data |>
@@ -208,13 +213,20 @@ forecast_fdom_30day <- function(forecast_date,
     pull(!!sym(target))
 
   if (length(curr_fdom) == 0 || is.na(curr_fdom)) return(NULL)
-  
-  # Mask future fDOM — prevents any observed or lagged fDOM on/after forecast_date from being accessible during the forecast loop
-  all_data <- all_data |>
-    mutate(
-      !!sym(target)  := if_else(Date >= forecast_date, NA_real_, !!sym(target)),
-      !!sym(lag_col) := if_else(Date >  forecast_date, NA_real_, !!sym(lag_col))
-    )
+
+  # Refit GLM on all history up to (not including) reference date
+  history_df <- all_data |>
+    filter(Date < forecast_date,
+           !is.na(!!sym(target)),
+           !is.na(!!sym(lag_col)))
+
+  if (!is.null(covariates)) {
+    for (cv in covariates) history_df <- history_df |> filter(!is.na(!!sym(cv)))
+  }
+
+  rhs        <- paste(c(lag_col, covariates), collapse = " + ")
+  fit_formula <- as.formula(paste(target, "~", rhs))
+  model      <- glm(fit_formula, data = history_df, family = gaussian, na.action = na.fail)
 
   # Sequence of dates: reference date through 30 days ahead
   forecast_dates <- seq(from = forecast_date,
@@ -223,7 +235,7 @@ forecast_fdom_30day <- function(forecast_date,
 
   # Pre-allocate forecast dataframe
   forecast_df <- tibble(
-    model_id =  model_obj$model_name,
+    model_id          = model_obj$model_name,
     reference_date    = forecast_date,
     forecast_date     = forecast_dates,
     Horizon           = as.integer(forecast_dates - reference_date),
@@ -236,14 +248,11 @@ forecast_fdom_30day <- function(forecast_date,
   # Step forward one day at a time
   for (i in 2:length(forecast_dates)) {
 
-    # Lag: prior step's prediction pulled from the forecast dataframe
     fdom_lag <- forecast_df$fDOM_1m_predicted[i - 1]
 
-    # Covariates: observed values for this forecast date
     fc_row <- all_data |> filter(Date == forecast_dates[i])
     if (nrow(fc_row) == 0) next
 
-    # Assemble newdata for predict()
     newdata <- setNames(data.frame(fdom_lag), lag_col)
     if (!is.null(covariates)) {
       for (cv in covariates) newdata[[cv]] <- fc_row[[cv]]
@@ -254,7 +263,7 @@ forecast_fdom_30day <- function(forecast_date,
 
   # Return only the 30 forecast days (drop horizon 0 seed row)
   forecast_df |> filter(Horizon > 0)
-} #end of function 
+} #end of function
 
 
 # #test function
@@ -287,24 +296,27 @@ run_forecasts <- function(model_obj,
   message(model_obj$model_name, " | forecasting ", length(valid_dates),
           " reference dates...")
 
-  map_dfr(valid_dates, \(d) forecast_fdom_30day(
-    forecast_date = d,
-    model_obj     = model_obj,
-    all_data      = all_data,
-    target        = target,
-    horizon       = horizon
-  )) 
+  map_dfr(valid_dates, \(d) {
+    cat("  -> starting forecast for ", format(d), "\n")
+    forecast_fdom_30day(
+      forecast_date = d,
+      model_obj     = model_obj,
+      all_data      = all_data,
+      target        = target,
+      horizon       = horizon
+    )
+  })
 }
 ```
 
 ```{r run-forecasts}
-forecasts_m1 <- run_forecasts(AR_lagonly, ar_df, pred_dates_2024)
-forecasts_m2 <- run_forecasts(AR_lake, ar_df, pred_dates_2024)
-forecasts_m3 <- run_forecasts(AR_catch, ar_df, pred_dates_2024)
-forecasts_m4 <- run_forecasts(AR_lake_catch, ar_df, pred_dates_2024)
+#forecasts_m1 <- run_forecasts(AR_lagonly, ar_df, pred_dates)
+forecasts_m2 <- run_forecasts(AR_lake, ar_df, pred_dates)
+forecasts_m3 <- run_forecasts(AR_catch, ar_df, pred_dates)
+forecasts_m4 <- run_forecasts(AR_lake_catch, ar_df, pred_dates)
 
 # Combine all models into one dataframe
-all_AR_forecasts <- bind_rows(forecasts_m1, forecasts_m2, forecasts_m3, forecasts_m4)
+all_AR_forecasts <- bind_rows(forecasts_m2, forecasts_m3, forecasts_m4)
 
 glimpse(all_AR_forecasts)
 
@@ -316,10 +328,8 @@ glimpse(all_AR_forecasts)
 
 ```{r save}
 write_csv(all_AR_forecasts,
-          "../Data/AR_forecasts_2024_22may26.csv")
+          "../Data/AR_forecasts_2024-2025_27may26.csv")
 
-message("Saved ", nrow(all_forecasts), " forecast rows across ",
-        n_distinct(all_forecasts$model_id), " models.")
 ```
 
 
@@ -350,7 +360,7 @@ forecast_persistence <- function(forecast_date,
 
 # Run across 2024
 valid_dates <- ar_df |>
-  filter(Date %in% pred_dates_2024, !is.na(fDOM_1_QSU_daily)) |>
+  filter(Date %in% pred_dates, !is.na(fDOM_1_QSU_daily)) |>
   pull(Date)
 
 all_persistence_forecasts <- map_dfr(valid_dates, \(d)
@@ -358,7 +368,7 @@ all_persistence_forecasts <- map_dfr(valid_dates, \(d)
 
 
 write_csv(all_persistence_forecasts,
-          "../Data/Persistence_forecasts_2024_22may26.csv")
+          "../Data/Persistence_forecasts_2024-2025_27may26.csv")
 
 
 ```
