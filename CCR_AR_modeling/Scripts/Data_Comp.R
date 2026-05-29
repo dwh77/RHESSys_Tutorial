@@ -252,21 +252,26 @@ summary(export_df)
 ##make plots
 driverdf <- read_csv("./CCR_AR_Modeling/Data/Daily_catwalk_RH_2021_2026.csv")
 
-driverdf |>
+driverplot <- driverdf |>
   select(-fDOM_1m_lag1) |>
+  mutate(RH_Q_cms = RH_Q_m3day / 86400) |> select(-RH_Q_m3day) |>
   # filter(Date > ymd("2024-04-01")) |>
   filter(Date > ymd("2021-08-19"), Date < ymd("2026-01-31")) |>
   pivot_longer(-1) |>
   ggplot(aes(x = Date, y = value))+
   geom_point()+ facet_wrap(~name, scales = "free_y")+
+  geom_vline(xintercept = ymd("2024-03-01"), linetype = 2, linewidth = 1.2, color = "red")+
   theme_bw()
 
+driverplot
+plotly::ggplotly(driverplot)
 
 driverdf |>
   # filter(Date > ymd("2024-04-01")) |>
   filter(Date > ymd("2021-08-19"), Date < ymd("2026-01-31")) |>
   ggplot(aes(x = Date, y = fDOM_1_QSU_daily))+
-  geom_point()+
+  geom_point()+ labs(x = "Date", y = "fDOM (QSU)")+
+  geom_vline(xintercept = ymd("2024-03-01"), linetype = 2, linewidth = 1.2, color = "red")+
   theme_bw()
 
 
