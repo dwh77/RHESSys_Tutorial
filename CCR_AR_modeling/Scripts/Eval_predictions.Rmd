@@ -41,7 +41,7 @@ Persistence <- read_csv("../Data/Persistence_forecasts_2024-2025_27may26.csv")
 
 
 
-#join predictiosn 
+#join predictions 
 predictions <- rbind(AR, ARIMA, Persistence, XGB, NNETAR) #, XGB, NNETAR
 # predictions <- rbind(AR, Persistence)
 
@@ -54,8 +54,12 @@ predict_ensemble <- predictions |>
          model_vars  = sub("^[^_]*_[^_]*_", "", model_id))  |> 
   filter(model_id != "Persistence") |> 
   group_by(reference_date, forecast_date, Horizon, model_vars) |> 
-  summarise(fDOM_1m_predicted = mean(fDOM_1m_predicted, na.rm = T),
+    summarise(fDOM_1m_predicted = median(fDOM_1m_predicted, na.rm = T), ## CHECK MEAN OR MEDIAN; was mean originally
             .groups = "drop") |> 
+  # summarise(fDOM_1m_predicted_mean = mean(fDOM_1m_predicted, na.rm = T), ## CHECK MEAN OR MEDIAN; was mean already
+  #           fDOM_1m_predicted_median = median(fDOM_1m_predicted, na.rm = T), ## CHECK MEAN OR MEDIAN; was mean already
+  #           .groups = "drop") |> 
+  # mutate(pred_resid = fDOM_1m_predicted_mean - fDOM_1m_predicted_median) |> 
   mutate(model_id = paste0("Ensemble_lag_", model_vars)) |> 
   select(-model_vars)
 
@@ -72,7 +76,7 @@ Pred_eval_df <- left_join(predictions, eval, by = c("forecast_date" =  "Date" ))
 
 
 ##set model colors 
-model_vars_colors <- c("lake" = "#56B4E9", "catchment" = "#009E73", "lake_catchment" = "#CC79A7")
+model_vars_colors <- c("lake" = "#56B4E9", "catchment" = "#009E73", "lake_catchment" = "#CC79A7", "Persistence" = "black")
 
 #c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000")
 
@@ -80,6 +84,96 @@ model_vars_colors <- c("lake" = "#56B4E9", "catchment" = "#009E73", "lake_catchm
 ```
 
 
+## Residual boxplots
+
+```{r}
+
+zzz <- Pred_eval_df |>
+  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs)) |>
+  mutate(
+    model_class = sub("_.*", "", model_id),
+    model_vars  = sub("^[^_]*_[^_]*_", "", model_id),
+    residual    = abs(fDOM_1m_obs - fDOM_1m_predicted)
+  ) |> 
+  filter(model_vars == "lake_catchment",
+         Horizon > 2, Horizon < 18,
+         residual > 6,
+         month(forecast_date) %in% c(3,4,5)
+         )
+
+zz <- Pred_eval_df |>
+  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs)) |>
+  mutate(
+    model_class = sub("_.*", "", model_id),
+    model_vars  = sub("^[^_]*_[^_]*_", "", model_id),
+    residual    = abs(fDOM_1m_obs - fDOM_1m_predicted)
+  ) |>
+    filter(model_class == "Ensemble") |> 
+    # filter(!(year(forecast_date) == 2025 & month(forecast_date) == 5)) |>  # remove May 2025
+   mutate(month = month(forecast_date),
+         Season = case_when(
+          month %in% c(12, 1, 2)  ~ "Winter",
+          month %in% c(3,  4, 5)  ~ "Spring",
+          month %in% c(6,  7, 8)  ~ "Summer",
+          month %in% c(9, 10, 11) ~ "Fall"
+        )) |> 
+   filter(Season %in% c("Spring", "Summer")) |> 
+  ggplot(aes(x = factor(Horizon), y = residual, color = model_vars)) +
+  geom_boxplot(aes(fill = model_vars), alpha = 0.3, outlier.shape = NA,
+               position = position_dodge(width = 0.8)) +
+  geom_jitter(aes(group = model_vars), alpha = 0.15, size = 0.6,
+              position = position_jitterdodge(jitter.width = 0.15, dodge.width = 0.8)) +
+  #facet_wrap(~model_vars) +
+  facet_grid(Season~model_vars) +
+  scale_color_manual(values = model_vars_colors) +
+  scale_fill_manual(values  = model_vars_colors) +
+  labs(x = "Forecast Horizon (days)", y = "Absolute Residual (QSU)",
+       color = NULL, fill = NULL) +
+  theme_bw() +
+  theme(legend.position = "top", text = element_text(size = 13),
+        axis.text.x = element_text(size = 7))
+
+zz
+# plotly::ggplotly(zz)
+
+
+## Look at just mean or median like pltos below but for residual 
+Pred_eval_df |>
+  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs)) |>
+  mutate(
+    model_class = sub("_.*", "", model_id),
+    model_vars  = sub("^[^_]*_[^_]*_", "", model_id),
+    residual    = abs(fDOM_1m_obs - fDOM_1m_predicted)
+  ) |> 
+  mutate(month  = month(forecast_date),
+        Season = case_when(
+          month %in% c(12, 1, 2)  ~ "Winter",
+          month %in% c(3,  4, 5)  ~ "Spring",
+          month %in% c(6,  7, 8)  ~ "Summer",
+          month %in% c(9, 10, 11) ~ "Fall"
+        )) |> 
+  group_by(model_id, model_class, model_vars, Horizon, Season) |> 
+  summarise(Resid = mean(abs(fDOM_1m_predicted - fDOM_1m_obs))) |> ## CHECK mean or median
+  filter(model_class == "Ensemble") |> 
+  ggplot(aes(x = Horizon, y = Resid, col = model_vars)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.6) +
+  facet_grid(model_class~Season)+
+  # scale_color_manual(values = model_colors) +
+  labs(x = "Prediction horizon (days ahead)", y = "Resid (QSU)", col = NULL) +
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 14))+
+  scale_color_manual(values = model_vars_colors)
+
+
+
+obsfDOM <- Pred_eval_df |> 
+  ggplot(aes(x = forecast_date, y = fDOM_1m_obs))+
+  geom_point()+ geom_line()+
+  scale_x_date(date_breaks = "2 month", date_labels = "%b %y")
+
+obsfDOM
+
+```
 
 
 
@@ -110,13 +204,13 @@ calc_rmse_by_horizon <- function(eval_df, by_season = FALSE) {
     df |>
       group_by(model_id, Horizon, Season) |>
       summarise(RMSE = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)),
-                #MAE = mean(abs(fDOM_1m_predicted - fDOM_1m_obs), na.rm = T),
+                MAE = mean(abs(fDOM_1m_predicted - fDOM_1m_obs), na.rm = T),
                 .groups = "drop")
   } else {
     df |>
       group_by(model_id, Horizon) |>
       summarise(RMSE = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)),
-                #MAE = mean(abs(fDOM_1m_predicted - fDOM_1m_obs), na.rm = T),
+                MAE = mean(abs(fDOM_1m_predicted - fDOM_1m_obs), na.rm = T),
                 .groups = "drop")
   }
 }
@@ -133,7 +227,7 @@ rmse_plot <- rmse_all |>
   mutate(model_class = sub("_.*", "", model_id)) |> 
   mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |> 
   filter(model_vars != "only") |> 
-  filter(model_class == "Ensemble") |> 
+  filter(model_class == "Ensemble") |>
   ggplot(aes(x = Horizon, y = RMSE, col = model_vars)) +
   geom_line(linewidth = 1) +
   geom_point(size = 1.6) +
@@ -145,6 +239,24 @@ rmse_plot <- rmse_all |>
 
 rmse_plot
 
+
+##with persistence with ensemble
+rmse_all |> 
+  mutate(model_class = sub("_.*", "", model_id)) |> 
+  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |> 
+  filter(model_vars != "only") |> 
+  # filter(model_class == "Ensemble") |> 
+  filter(model_class %in% c("Ensemble", "Persistence")) |> 
+  ggplot(aes(x = Horizon, y = RMSE, col = model_vars)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.6) +
+  # facet_wrap(~model_class)+
+  # scale_color_manual(values = model_colors) +
+  labs(x = "Prediction horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 14))+
+  scale_color_manual(values = model_vars_colors)
+
+
 ```
 
 ### Seasonal RMSE by horizon
@@ -153,7 +265,10 @@ rmse_plot
 
 rmse_all_season  <- calc_rmse_by_horizon(Pred_eval_df,  by_season = TRUE)
 
- rmse_all_season |> 
+ rmse_season_plot <- Pred_eval_df |> 
+  #filter(!(year(forecast_date) == 2025 & month(forecast_date) == 5)) |>  # remove May 2025
+  #filter(!(year(forecast_date) == 2025 & month(forecast_date) == 7)) |>  # remove July 2025
+  calc_rmse_by_horizon( by_season = TRUE) |> 
   mutate(model_class = sub("_.*", "", model_id)) |> 
   mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |> 
   filter(model_vars != "only") |>
@@ -164,10 +279,26 @@ rmse_all_season  <- calc_rmse_by_horizon(Pred_eval_df,  by_season = TRUE)
   facet_grid(model_class~factor(Season, levels = c("Spring", "Summer", "Fall", "Winter")))+
   # scale_color_manual(values = model_colors) +
   labs(x = "Prediction horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
-  theme_bw() + theme(legend.position = "top", text = element_text(size = 14))+
+  theme_bw() + theme(legend.position = "right", text = element_text(size = 14))+
   scale_color_manual(values = model_vars_colors)
 
+rmse_season_plot
 
+
+##ensemble w/ persistence
+Pred_eval_df |> 
+  calc_rmse_by_horizon( by_season = TRUE) |> 
+  mutate(model_class = sub("_.*", "", model_id)) |> 
+  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |> 
+  filter(model_vars != "only") |>
+  filter(model_class %in% c("Ensemble", "Persistence")) |> 
+  ggplot(aes(x = Horizon, y = RMSE, col = model_vars)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.6) +
+  facet_wrap(~factor(Season, levels = c("Spring", "Summer", "Fall", "Winter")), nrow =1 )+
+  labs(x = "Prediction horizon (days ahead)", y = "RMSE (QSU)", col = NULL) +
+  theme_bw() + theme(legend.position = "right", text = element_text(size = 14))+
+  scale_color_manual(values = model_vars_colors)
 
 ```
 
@@ -251,7 +382,7 @@ skill_by_horizon_season <- rmse_by_horizon_season |>
   mutate(Skill = 1 - (RMSE / RMSE_persistence))
 
 #PLOT
-skill_by_horizon_season |> 
+skill_season_plot <- skill_by_horizon_season |> 
   mutate(model_class = sub("_.*", "", model_id)) |> 
   mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |> 
   filter(model_vars != "only") |> 
@@ -263,9 +394,12 @@ ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
   labs(x = "Prediction Horizon (days)", y = "Skill (vs. Persistence)",
        color = NULL) +
   theme_bw() +
-  theme(legend.position = "top")+
+  theme(legend.position = "right")+
   scale_color_manual(values = model_vars_colors)
 
+skill_season_plot
+
+rmse_season_plot / skill_season_plot
 
 ```
 
@@ -306,6 +440,363 @@ ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
   scale_color_manual(values = model_vars_colors)
 
 ```
+
+
+
+## Dry vs Wet Month Comparison (Aug 2024 vs Feb 2025)
+
+Ensemble model RMSE and skill for the driest month (August 2024) and wettest month
+(February 2025).
+
+```{r dry-wet-rmse}
+#### RMSE
+wet_dry_ens <- Pred_eval_df |>
+  filter(grepl("Ensemble", model_id)) |>
+  filter((year(forecast_date) == 2024 & month(forecast_date) == 8) |
+         (year(forecast_date) == 2025 & month(forecast_date) == 2)) |>
+  mutate(Period = case_when(
+    year(forecast_date) == 2024 & month(forecast_date) == 8 ~ "Aug 2024 (Dry)",
+    year(forecast_date) == 2025 & month(forecast_date) == 2 ~ "Feb 2025 (Wet)"
+  ))
+
+rmse_wet_dry <- wet_dry_ens |>
+  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs)) |>
+  group_by(model_id, Period, Horizon) |>
+  summarise(RMSE = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)),
+             MAE = mean(abs(fDOM_1m_predicted - fDOM_1m_obs), na.rm = T),
+            .groups = "drop")
+
+WetDry_rmse <- rmse_wet_dry |>
+  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |>
+  ggplot(aes(x = Horizon, y = RMSE, color = model_vars)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.6) +
+  facet_wrap(~Period) +
+  labs(x = "Prediction Horizon (days)", y = "RMSE (QSU)", color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right", text = element_text(size = 13))+
+  scale_color_manual(values = model_vars_colors)
+
+
+#### SKill
+persistence_wet_dry <- Pred_eval_df |>
+  filter(model_id == "Persistence") |>
+  filter((year(forecast_date) == 2024 & month(forecast_date) == 8) |
+         (year(forecast_date) == 2025 & month(forecast_date) == 2)) |>
+  mutate(Period = case_when(
+    year(forecast_date) == 2024 & month(forecast_date) == 8 ~ "Aug 2024 (Dry)",
+    year(forecast_date) == 2025 & month(forecast_date) == 2 ~ "Feb 2025 (Wet)"
+  )) |>
+  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs)) |>
+  group_by(Period, Horizon) |>
+  summarise(RMSE_persistence = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)),
+            .groups = "drop")
+
+skill_wet_dry <- rmse_wet_dry |>
+  left_join(persistence_wet_dry, by = c("Period", "Horizon")) |>
+  mutate(Skill = 1 - (RMSE / RMSE_persistence))
+
+WetDry_skill <- skill_wet_dry |>
+  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |>
+  ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 1.6) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_wrap(~Period) +
+  ylim(-3.5, 1)+
+  labs(x = "Prediction Horizon (days)", y = "Skill (vs. Persistence)", color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right", text = element_text(size = 13))+
+  scale_color_manual(values = model_vars_colors)
+
+
+
+#stack plots
+
+WetDry_rmse / WetDry_skill
+
+```
+
+
+
+
+## Flow duratin curve
+
+```{r}
+flow <- read_csv("../Data/Daily_catwalk_RH_2021_2026.csv")
+
+fdc <- flow |>
+  select(Date, RH_Q_m3day) |> 
+  filter(!is.na(RH_Q_m3day)) |>
+  arrange(desc(RH_Q_m3day)) |>
+  mutate(exceedance = row_number() / (n() + 1) * 100)
+
+fdc |> 
+  ggplot(aes(x = exceedance, y = RH_Q_m3day)) +
+  geom_line() +
+  scale_y_log10() +
+  labs(x = "Exceedance Probability (%)", y = "Q (m3/day)",
+       title = "Flow Duration Curve") +
+  theme_bw()
+
+```
+
+
+
+
+## Strat v mixed
+
+
+```{r}
+
+#get strat classification
+getwd()
+driverdf <- read_csv("../Data/Daily_catwalk_RH_2021_2026.csv")
+
+strat <- driverdf |> 
+  select(Date, Diff_Dens_1_max) |> 
+  mutate(Strat = ifelse(Diff_Dens_1_max > 0.1, "Strat", "Mixed"))
+
+#### RMSE
+Mix_ens <- Pred_eval_df |> 
+  left_join(strat, by = c("forecast_date" = "Date")) |> 
+  filter(grepl("Ensemble", model_id)) 
+
+rmse_Mix <- Mix_ens |>
+  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs),
+         !is.na(Strat)) |>
+  group_by(model_id, Strat, Horizon) |>
+  summarise(RMSE = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)),
+            MAE = mean(abs(fDOM_1m_predicted - fDOM_1m_obs), na.rm = T),
+            .groups = "drop")
+
+Mix_rmse <- rmse_Mix |>
+  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |>
+  ggplot(aes(x = Horizon, y = RMSE, color = model_vars)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.6) +
+  facet_wrap(~Strat) +
+  labs(x = "Prediction Horizon (days)", y = "RMSE (QSU)", color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right", text = element_text(size = 13))+
+  scale_color_manual(values = model_vars_colors)
+
+
+#### SKill
+persistence_Mix <- Pred_eval_df |>
+  left_join(strat, by = c("forecast_date" = "Date")) |>
+  filter(model_id == "Persistence") |>
+  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs),
+          !is.na(Strat)) |>
+  group_by(Strat, Horizon) |>
+  summarise(RMSE_persistence = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)),
+            .groups = "drop")
+
+skill_Mix <- rmse_Mix |>
+  left_join(persistence_Mix, by = c("Strat", "Horizon")) |>
+  mutate(Skill = 1 - (RMSE / RMSE_persistence))
+
+Mix_skill <- skill_Mix |>
+  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |>
+  ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 1.6) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_wrap(~Strat) +
+  labs(x = "Prediction Horizon (days)", y = "Skill (vs. Persistence)", color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right", text = element_text(size = 13))+
+  scale_color_manual(values = model_vars_colors)
+
+
+
+#stack plots
+
+Mix_rmse / Mix_skill
+
+
+
+##resid 
+Mix_ens |>
+  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs),
+         !is.na(Strat)) |>
+  mutate(
+    model_class = sub("_.*", "", model_id),
+    model_vars  = sub("^[^_]*_[^_]*_", "", model_id),
+    residual    = abs(fDOM_1m_obs - fDOM_1m_predicted)
+  ) |> 
+  filter(model_class == "Ensemble") |> 
+  group_by(model_id, model_class, model_vars, Horizon, Strat) |> 
+  summarise(Resid = mean(abs(fDOM_1m_predicted - fDOM_1m_obs))) |> ## CHECK mean or median
+  ggplot(aes(x = Horizon, y = Resid, col = model_vars)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.6) +
+  facet_grid(model_class~Strat)+
+  labs(x = "Prediction horizon (days ahead)", y = "Resid (QSU)", col = NULL) +
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 14))+
+  scale_color_manual(values = model_vars_colors)
+
+```
+
+
+
+## Density driven seasons 
+
+```{r}
+
+#get strat classification
+getwd()
+driverdf <- read_csv("../Data/Daily_catwalk_RH_2021_2026.csv")
+
+strat <- driverdf |> 
+  select(Date, Diff_Dens_1_max) |> 
+  mutate(Strat = ifelse(Diff_Dens_1_max > 0.3, "Strat", NA),
+         Strat = ifelse(Diff_Dens_1_max < 0.1, "Mixed", Strat),
+         Strat = ifelse(is.na(Strat), "Shoulder", Strat),
+          Strat = ifelse(is.na(Diff_Dens_1_max), NA, Strat),
+          )
+
+
+strat |> 
+  ggplot(aes(x = Date, y =Strat))+ geom_point()
+
+#### RMSE
+Mix_ens <- Pred_eval_df |> 
+  left_join(strat, by = c("forecast_date" = "Date")) |> 
+  filter(grepl("Ensemble", model_id)) 
+
+rmse_Mix <- Mix_ens |>
+  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs),
+         !is.na(Strat)) |>
+  group_by(model_id, Strat, Horizon) |>
+  summarise(RMSE = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)),
+            MAE = mean(abs(fDOM_1m_predicted - fDOM_1m_obs), na.rm = T),
+            .groups = "drop")
+
+Mix_rmse <- rmse_Mix |>
+  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |>
+  ggplot(aes(x = Horizon, y = RMSE, color = model_vars)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.6) +
+  facet_wrap(~Strat) +
+  labs(x = "Prediction Horizon (days)", y = "RMSE (QSU)", color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right", text = element_text(size = 13))+
+  scale_color_manual(values = model_vars_colors)
+
+
+#### SKill
+persistence_Mix <- Pred_eval_df |>
+  left_join(strat, by = c("forecast_date" = "Date")) |>
+  filter(model_id == "Persistence") |>
+  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs),
+          !is.na(Strat)) |>
+  group_by(Strat, Horizon) |>
+  summarise(RMSE_persistence = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)),
+            .groups = "drop")
+
+skill_Mix <- rmse_Mix |>
+  left_join(persistence_Mix, by = c("Strat", "Horizon")) |>
+  mutate(Skill = 1 - (RMSE / RMSE_persistence))
+
+Mix_skill <- skill_Mix |>
+  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |>
+  ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 1.6) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_wrap(~Strat) +
+  labs(x = "Prediction Horizon (days)", y = "Skill (vs. Persistence)", color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right", text = element_text(size = 13))+
+  scale_color_manual(values = model_vars_colors)
+
+
+
+#stack plots
+
+Mix_rmse / Mix_skill
+
+
+```
+
+
+
+## First difference trial
+
+```{r}
+#Firs first difference value > 90th percentile
+eval2 <- eval |> mutate(fDOM_1dif = abs(fDOM_1m_obs - lag(fDOM_1m_obs, 1)))
+
+summary(eval2$fDOM_1dif)
+quantile(eval2$fDOM_1dif, probs = 0.9, na.rm = TRUE)
+
+
+eval2$HighVar = ifelse(eval2$fDOM_1dif > 0.68, "High_Var", "Low_Var" )
+
+highvar_df <- eval2 |> select(Date, HighVar)
+
+## Join to predvar and plot
+
+#### RMSE
+HighVar_ens <- Pred_eval_df |> 
+  left_join(highvar_df, by = c("forecast_date" = "Date")) |> 
+  filter(grepl("Ensemble", model_id)) 
+
+rmse_HighVar <- HighVar_ens |>
+  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs),
+         !is.na(HighVar)) |>
+  group_by(model_id, HighVar, Horizon) |>
+  summarise(RMSE = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)),
+            MAE = mean(abs(fDOM_1m_predicted - fDOM_1m_obs), na.rm = T),
+            .groups = "drop")
+
+highvar_rmse <- rmse_HighVar |>
+  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |>
+  ggplot(aes(x = Horizon, y = RMSE, color = model_vars)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.6) +
+  facet_wrap(~HighVar) +
+  labs(x = "Prediction Horizon (days)", y = "RMSE (QSU)", color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right", text = element_text(size = 13))+
+  scale_color_manual(values = model_vars_colors)
+
+
+#### SKill
+persistence_HighVar <- Pred_eval_df |>
+  left_join(highvar_df, by = c("forecast_date" = "Date")) |>
+  filter(model_id == "Persistence") |>
+  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs),
+          !is.na(HighVar)) |>
+  group_by(HighVar, Horizon) |>
+  summarise(RMSE_persistence = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)),
+            .groups = "drop")
+
+skill_HighVar <- rmse_HighVar |>
+  left_join(persistence_HighVar, by = c("HighVar", "Horizon")) |>
+  mutate(Skill = 1 - (RMSE / RMSE_persistence))
+
+highvar_skill <- skill_HighVar |>
+  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |>
+  ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 1.6) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_wrap(~HighVar) +
+  labs(x = "Prediction Horizon (days)", y = "Skill (vs. Persistence)", color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right", text = element_text(size = 13))+
+  scale_color_manual(values = model_vars_colors)
+
+
+highvar_rmse / highvar_skill
+
+```
+
+
+
+
 
 
 
@@ -423,167 +914,6 @@ plot_forecast(
 ## Interesting dates: "2025-09-15";
 
 ```
-
----
-
-## Dry vs Wet Month Comparison (Aug 2024 vs Feb 2025)
-
-Ensemble model RMSE and skill for the driest month (August 2024) and wettest month
-(February 2025).
-
-```{r dry-wet-rmse}
-#### RMSE
-wet_dry_ens <- Pred_eval_df |>
-  filter(grepl("Ensemble", model_id)) |>
-  filter((year(forecast_date) == 2024 & month(forecast_date) == 8) |
-         (year(forecast_date) == 2025 & month(forecast_date) == 2)) |>
-  mutate(Period = case_when(
-    year(forecast_date) == 2024 & month(forecast_date) == 8 ~ "Aug 2024 (Dry)",
-    year(forecast_date) == 2025 & month(forecast_date) == 2 ~ "Feb 2025 (Wet)"
-  ))
-
-rmse_wet_dry <- wet_dry_ens |>
-  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs)) |>
-  group_by(model_id, Period, Horizon) |>
-  summarise(RMSE = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)), .groups = "drop")
-
-WetDry_rmse <- rmse_wet_dry |>
-  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |>
-  ggplot(aes(x = Horizon, y = RMSE, color = model_vars)) +
-  geom_line(linewidth = 1) +
-  geom_point(size = 1.6) +
-  facet_wrap(~Period) +
-  labs(x = "Prediction Horizon (days)", y = "RMSE (QSU)", color = NULL) +
-  theme_bw() +
-  theme(legend.position = "right", text = element_text(size = 13))+
-  scale_color_manual(values = model_vars_colors)
-
-
-#### SKill
-persistence_wet_dry <- Pred_eval_df |>
-  filter(model_id == "Persistence") |>
-  filter((year(forecast_date) == 2024 & month(forecast_date) == 8) |
-         (year(forecast_date) == 2025 & month(forecast_date) == 2)) |>
-  mutate(Period = case_when(
-    year(forecast_date) == 2024 & month(forecast_date) == 8 ~ "Aug 2024 (Dry)",
-    year(forecast_date) == 2025 & month(forecast_date) == 2 ~ "Feb 2025 (Wet)"
-  )) |>
-  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs)) |>
-  group_by(Period, Horizon) |>
-  summarise(RMSE_persistence = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)),
-            .groups = "drop")
-
-skill_wet_dry <- rmse_wet_dry |>
-  left_join(persistence_wet_dry, by = c("Period", "Horizon")) |>
-  mutate(Skill = 1 - (RMSE / RMSE_persistence))
-
-WetDry_skill <- skill_wet_dry |>
-  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |>
-  ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
-  geom_line(linewidth = 1.2) +
-  geom_point(size = 1.6) +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  facet_wrap(~Period) +
-  ylim(-3.5, 1)+
-  labs(x = "Prediction Horizon (days)", y = "Skill (vs. Persistence)", color = NULL) +
-  theme_bw() +
-  theme(legend.position = "right", text = element_text(size = 13))+
-  scale_color_manual(values = model_vars_colors)
-
-
-
-#stack plots
-
-WetDry_rmse / WetDry_skill
-
-```
-
-
-
-
-
-## Strat v mixed
-
-
-```{r}
-
-#get strat classification
-getwd()
-driverdf <- read_csv("../Data/Daily_catwalk_RH_2021_2026.csv")
-
-strat <- driverdf |> 
-  select(Date, Diff_Dens_1_max) |> 
-  mutate(Strat = ifelse(Diff_Dens_1_max > 0.1, "Strat", "Mixed"))
-
-#### RMSE
-Mix_ens <- Pred_eval_df |> 
-  left_join(strat, by = c("forecast_date" = "Date")) |> 
-  filter(grepl("Ensemble", model_id)) 
-
-rmse_Mix <- Mix_ens |>
-  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs),
-         !is.na(Strat)) |>
-  group_by(model_id, Strat, Horizon) |>
-  summarise(RMSE = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)), .groups = "drop")
-
-Mix_rmse <- rmse_Mix |>
-  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |>
-  ggplot(aes(x = Horizon, y = RMSE, color = model_vars)) +
-  geom_line(linewidth = 1) +
-  geom_point(size = 1.6) +
-  facet_wrap(~Strat) +
-  labs(x = "Prediction Horizon (days)", y = "RMSE (QSU)", color = NULL) +
-  theme_bw() +
-  theme(legend.position = "right", text = element_text(size = 13))+
-  scale_color_manual(values = model_vars_colors)
-
-
-#### SKill
-persistence_Mix <- Pred_eval_df |>
-  left_join(strat, by = c("forecast_date" = "Date")) |>
-  filter(model_id == "Persistence") |>
-  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs),
-          !is.na(Strat)) |>
-  group_by(Strat, Horizon) |>
-  summarise(RMSE_persistence = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)),
-            .groups = "drop")
-
-skill_Mix <- rmse_Mix |>
-  left_join(persistence_Mix, by = c("Strat", "Horizon")) |>
-  mutate(Skill = 1 - (RMSE / RMSE_persistence))
-
-Mix_skill <- skill_Mix |>
-  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |>
-  ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
-  geom_line(linewidth = 1.2) +
-  geom_point(size = 1.6) +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  facet_wrap(~Strat) +
-  labs(x = "Prediction Horizon (days)", y = "Skill (vs. Persistence)", color = NULL) +
-  theme_bw() +
-  theme(legend.position = "right", text = element_text(size = 13))+
-  scale_color_manual(values = model_vars_colors)
-
-
-
-#stack plots
-
-Mix_rmse / Mix_skill
-
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 ---
