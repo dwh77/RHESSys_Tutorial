@@ -520,24 +520,123 @@ WetDry_rmse / WetDry_skill
 
 
 
-## Flow duratin curve
+## Flow percentile duratin curve
 
 ```{r}
-flow <- read_csv("../Data/Daily_catwalk_RH_2021_2026.csv")
+##USGS data
+USGS_daily <- dataRetrieval::readNWISdv(
+  siteNumbers = "02055100",
+  parameterCd = "00060",          # discharge in cfs
+  startDate = "2020-01-01",
+  endDate   = "2026-04-01"
+) |>  dataRetrieval::renameNWISColumns()
 
-fdc <- flow |>
-  select(Date, RH_Q_m3day) |> 
-  filter(!is.na(RH_Q_m3day)) |>
-  arrange(desc(RH_Q_m3day)) |>
-  mutate(exceedance = row_number() / (n() + 1) * 100)
+#set up flow percentile
+flow_percentiles <- USGS_daily |>
+  filter(Date >= ymd("2024-01-01"), Date <= ymd("2026-01-31")) |>
+  filter(!is.na(Flow)) |>
+  mutate(flow_percentile = percent_rank(Flow) * 100)
 
-fdc |> 
-  ggplot(aes(x = exceedance, y = RH_Q_m3day)) +
-  geom_line() +
-  scale_y_log10() +
-  labs(x = "Exceedance Probability (%)", y = "Q (m3/day)",
-       title = "Flow Duration Curve") +
-  theme_bw()
+# Step 2: flag top and bottom 10th percentile dates
+# flow_flags <- flow_percentiles |>
+#   mutate(flow_class = case_when(
+#     flow_percentile < 10  ~ "Low flow",
+#     flow_percentile > 90  ~ "High flow",
+#     TRUE                   ~ "Normal"
+#   )) |>
+#   select(Date, Flow, flow_percentile, flow_class)
+
+flow_flags <- flow_percentiles |>
+  mutate(
+    decile     = ntile(Flow, 10),
+    flow_class = case_when(
+      decile == 1  ~ "Low flow",
+      decile == 10 ~ "High flow",
+      TRUE         ~ "Normal"
+    )
+  ) |>
+  select(Date, Flow, flow_percentile, decile, flow_class)
+
+flow_flag_check <- flow_flags |> 
+  filter(flow_class != "Normal")
+
+## Join to pred eval and plot
+DryWet2 <- Pred_eval_df |>
+  left_join(flow_flags, by = c("forecast_date" = "Date")) |> 
+  # filter(flow_class %in% c("Low flow", "High flow")) |> 
+  filter(!is.na(fDOM_1m_predicted), !is.na(fDOM_1m_obs),
+          flow_class != "Normal") |>
+  group_by(model_id, flow_class, Horizon) |>
+  summarise(RMSE = sqrt(mean((fDOM_1m_predicted - fDOM_1m_obs)^2)),
+             MAE = mean(abs(fDOM_1m_predicted - fDOM_1m_obs), na.rm = T),
+            .groups = "drop")
+
+DryWet2_ens <- DryWet2 |> 
+  filter(grepl("Ensemble", model_id)) 
+  
+
+flowrmse2 <- DryWet2_ens |>
+  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id)) |>
+  ggplot(aes(x = Horizon, y = RMSE, color = model_vars)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 1.6) +
+  facet_wrap(~flow_class) +
+  labs(x = "Prediction Horizon (days)", y = "RMSE (QSU)", color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right", text = element_text(size = 13))+
+  scale_color_manual(values = model_vars_colors)
+
+
+#### SKill
+DryWet2_per <- DryWet2 |> 
+  filter(grepl("Persistence", model_id)) |> 
+  select(-MAE) |> 
+  rename(RMSE_persistence = RMSE)
+
+skill_DryWet2 <- DryWet2_ens |>
+  left_join(DryWet2_per, by = c("flow_class", "Horizon")) |>
+  mutate(Skill = 1 - (RMSE / RMSE_persistence))
+
+flowskill2 <- skill_DryWet2 |>
+  mutate(model_vars = sub("^[^_]*_[^_]*_", "", model_id.x)) |>
+  ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 1.6) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_wrap(~flow_class) +
+  # ylim(-3.5, 1)+
+  labs(x = "Prediction Horizon (days)", y = "Skill (vs. Persistence)", color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right", text = element_text(size = 13))+
+  scale_color_manual(values = model_vars_colors)
+
+
+
+#stack plots
+
+flowrmse2 / flowskill2
+
+
+
+```
+
+
+```{r}
+# flow <- read_csv("../Data/Daily_catwalk_RH_2021_2026.csv")
+# 
+# fdc <- flow |>
+#   select(Date, RH_Q_m3day) |> 
+#   filter(!is.na(RH_Q_m3day)) |>
+#   arrange(desc(RH_Q_m3day)) |>
+#   mutate(exceedance = row_number() / (n() + 1) * 100)
+# 
+# fdc |> 
+#   ggplot(aes(x = exceedance, y = RH_Q_m3day)) +
+#   geom_line() +
+#   scale_y_log10() +
+#   labs(x = "Exceedance Probability (%)", y = "Q (m3/day)",
+#        title = "Flow Duration Curve") +
+#   theme_bw()
 
 ```
 
