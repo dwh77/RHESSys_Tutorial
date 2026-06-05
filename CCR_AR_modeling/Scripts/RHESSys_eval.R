@@ -21,7 +21,7 @@ ccr_area_m2 <- 45.83578 * 1000000
 
 output_h2o_grow <- left_join(output_h2o, output_grow, by = c("day", "month", "year", "basinID")) |>
   mutate(date = ymd(paste(year, month, day, sep = "-"))) |>
-  filter(date >= ymd("2020-01-01")) |>
+  filter(date >= ymd("2021-01-01")) |>
   select(date, streamflow, return, baseflow, streamflow_NO3, streamflow_DOC, lai.y) |>
   rename(lai = lai.y) |>
   #Q unit conversions
@@ -43,7 +43,7 @@ output_streamrouting <- read_delim(paste0(workpath, "/harvest1850_2026run_stream
 #get reaches of interest
 sr_df <- output_streamrouting  |>
   mutate(date = as.Date(paste(year, month, day, sep = "-"))) |>
-  filter(date >= ymd("2020-01-01")) |>
+  filter(date >= ymd("2021-01-01")) |>
   # filter(reachID == 2) |>
   filter(reachID %in% c(2,62,36,28)) |>
   mutate(reach_ID_name = ifelse(reachID == 2, "CCR dam", NA),
@@ -106,27 +106,27 @@ target <- read_csv("C:/Users/dwh18/OneDrive/Desktop/R_Projects/RHESSys_developme
 #site 101 is only LAI
 lai_eval <- target |>
   mutate(date = as.Date(Date)) |>
-  filter(date >= ymd("2020-01-01")) |>
+  filter(date >= ymd("2021-01-01")) |>
   select(date, lai_MODIS)
 
-output_h2o_grow |>
-  select(date, lai) |>  rename(lai_RHESSys = lai) |>
+lai_SI <- output_h2o_grow |>
+  select(date, lai) |> rename(lai_RHESSys = lai) |>
   left_join(lai_eval, by = "date") |>
-  # pivot_longer(-1) |>
-  ggplot(aes(x = date))+
-  geom_line(aes(y = lai_RHESSys), color = "blue")+
-  geom_point(aes(y = lai_MODIS), color = "black")+
-  theme_bw()+
-  labs(x = "Date", y = "LAI")
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = lai_RHESSys, color = "Modeled")) +
+  geom_point(aes(y = lai_MODIS, color = "Observed")) +
+  scale_color_manual(values = c("Modeled" = "blue", "Observed" = "black")) +
+  theme_bw() +
+  labs(x = "Date", y = "LAI", color = NULL) +
+  theme(legend.position = "top", text = element_text(size = 14))
 
-
-
+lai_SI
 
 ################################################################################
 #### HPB Q evals ----
 hpb_PT_eval <- target |>
   mutate(date = as.Date(Date)) |>
-  filter(date >= ymd("2020-01-01"),
+  filter(date >= ymd("2021-01-01"),
          Site == 100) |>
   select(date, HPB_Q_PT_m3day, HPB_Q_lm_m3day)
 
@@ -149,37 +149,69 @@ hpb_plot <- sr_df |>
   select(date, Q_m3day_mod, HPB_Q_PT_m3day, HPB_Q_lm_m3day) |>
   mutate(across(c(Q_m3day_mod, HPB_Q_PT_m3day, HPB_Q_lm_m3day), ~ . / 86.4))
 
+summary(hpb_plot$Q_m3day_mod)
+summary(hpb_plot$HPB_Q_PT_m3day)
+summary(hpb_plot$HPB_Q_lm_m3day)
+
+
+
 # Calculate RMSE for each comparison
+
 rmse_PT <- hpb_plot |>
   filter(!is.na(HPB_Q_PT_m3day)) |>
-  summarise(RMSE = round(sqrt(mean((Q_m3day_mod - HPB_Q_PT_m3day)^2)), 2)) |>
+  summarise(RMSE = round(sqrt(mean((Q_m3day_mod - HPB_Q_PT_m3day)^2)), 2),
+            MAE = round(mean(abs(Q_m3day_mod - HPB_Q_PT_m3day)), 2),
+            PearsonR = cor(HPB_Q_PT_m3day, Q_m3day_mod),
+            R2 = cor(HPB_Q_PT_m3day, Q_m3day_mod)^2
+            ) |>
   pull(RMSE)
 
 rmse_lm <- hpb_plot |>
   filter(!is.na(HPB_Q_lm_m3day)) |>
-  summarise(RMSE = round(sqrt(mean((Q_m3day_mod - HPB_Q_lm_m3day)^2)), 2)) |>
+  summarise(RMSE = round(sqrt(mean((Q_m3day_mod - HPB_Q_lm_m3day)^2)), 2),
+            MAE = round(mean(abs(Q_m3day_mod - HPB_Q_lm_m3day), na.rm = T), 2),
+            PearsonR = cor(HPB_Q_lm_m3day, Q_m3day_mod),
+            R2 = cor(HPB_Q_lm_m3day, Q_m3day_mod)^2) |>
   pull(RMSE)
 
 # Plot 1: Modeled vs PT
-p1 <- ggplot(hpb_plot, aes(x = date)) +
-  geom_point(aes(y = HPB_Q_PT_m3day), color = "black", size = 1.5, alpha = 0.6) +
-  geom_line(aes(y = Q_m3day_mod), color = "blue") +
+p1 <- hpb_plot |>
+  ggplot(aes(x = date)) +
+  geom_point(aes(y = HPB_Q_PT_m3day, color = "Observed"), size = 1.5, alpha = 0.6) +
+  geom_line(aes(y = Q_m3day_mod, color = "Modeled")) +
+  scale_color_manual(values = c("Modeled" = "blue", "Observed" = "black")) +
   labs(title = paste0("HPB: Modeled vs PT  |  RMSE = ", rmse_PT, " L/s"),
-       x = NULL, y = "Q (L/s)") +
-  scale_y_log10()+
-  theme_bw()
+       x = NULL, y = "Q (L/s)", color = NULL) +
+  scale_y_log10() +
+  theme_bw() +
+  theme(legend.position = "top")
 
 # Plot 2: Modeled vs LM
-p2 <- ggplot(hpb_plot, aes(x = date)) +
-  geom_point(aes(y = HPB_Q_lm_m3day), color = "black", size = 1.5, alpha = 0.6) +
-  geom_line(aes(y = Q_m3day_mod), color = "blue") +
+p2 <- hpb_plot |>
+  ggplot(aes(x = date)) +
+  geom_point(aes(y = HPB_Q_lm_m3day, color = "Observed"), size = 1.5, alpha = 0.6) +
+  geom_line(aes(y = Q_m3day_mod, color = "Modeled")) +
+  scale_color_manual(values = c("Modeled" = "blue", "Observed" = "black")) +
   labs(title = paste0("HPB: Modeled vs LM  |  RMSE = ", rmse_lm, " L/s"),
-       x = NULL, y = "Q (L/s)") +
-  scale_y_log10()+
-  theme_bw()
+       x = NULL, y = "Q (L/s)", color = NULL) +
+  scale_y_log10() +
+  theme_bw() +
+  theme(legend.position = "top")
 
-# Display together
 p1 / p2
+
+Q_SI <- hpb_plot |>
+  ggplot(aes(x = date)) +
+  geom_point(aes(y = HPB_Q_lm_m3day, color = "Observed"), size = 1.5, alpha = 0.6) +
+  geom_line(aes(y = Q_m3day_mod, color = "Modeled")) +
+  scale_color_manual(values = c("Modeled" = "blue", "Observed" = "black")) +
+  labs(#title = paste0("HPB: Modeled vs LM  |  RMSE = ", rmse_lm, " L/s"),
+       x = NULL, y = "Q (L/s)", color = NULL) +
+  scale_y_log10() +
+  theme_bw() +
+  theme(legend.position = "none", text = element_text(size = 14))
+
+Q_SI
 
 ################################################################################
 #### Stream chem and flowmate eval ----
@@ -187,7 +219,7 @@ p1 / p2
 ##set up obs data
 obs_long <- target |>
   mutate(date = as.Date(Date)) |>
-  filter(date >= ymd("2020-01-01"),
+  filter(date >= ymd("2021-01-01"),
          Site != 101) |>
   mutate(Site_name = ifelse(Site == 100, "HPB", NA),
          Site_name = ifelse(Site == 300, "SMB", Site_name),
@@ -234,16 +266,31 @@ ggplot(aes(x = Date, y = Value)) +
   labs(title = "Modeled vs Observed", y = NULL, color = "Site") +
   theme_bw()
 
-# Q only plot
-ggplot(filter(combined_long, Variable == "Q_m3day"),
-       aes(x = Date, y = Value)) +
-  geom_line(data = filter(combined_long, Variable == "Q_m3day", Data_type == "Modeled"), color = "lightblue") +
-  geom_point(data = filter(combined_long, Variable == "Q_m3day", Data_type == "Observed"),
-             size = 1.5, alpha = 0.6) +
-  scale_y_log10() +
-  facet_wrap(~Site)+
-  labs(title = "Modeled vs Observed Discharge", y = "Q (m³/day, log scale)", color = "Site") +
-  theme_bw()
+## only DOC
+doc_SI <- combined_long |>
+  filter(Variable == "DOC_mgL") |>
+  ggplot(aes(x = Date, y = Value)) +
+  geom_line(data = filter(combined_long, Data_type == "Modeled", Variable == "DOC_mgL"), color = "lightblue") +
+  geom_point(data = filter(combined_long, Data_type == "Observed", Variable == "DOC_mgL"), size = 1.5, alpha = 0.6) +
+  facet_grid(Variable~Site, scales = "free_y") +
+  labs(y = "DOC (mg/L) ", color = "Site") +
+  theme_bw()+ theme( text = element_text(size = 14))
+
+doc_SI
+
+##SI RHESSys figure
+(lai_SI / doc_SI / Q_SI) +  plot_annotation(tag_levels = c('a', 'b', 'c') )
+
+# #Q only plot
+# ggplot(filter(combined_long, Variable == "Q_m3day"),
+#        aes(x = Date, y = Value)) +
+#   geom_line(data = filter(combined_long, Variable == "Q_m3day", Data_type == "Modeled"), color = "lightblue") +
+#   geom_point(data = filter(combined_long, Variable == "Q_m3day", Data_type == "Observed"),
+#              size = 1.5, alpha = 0.6) +
+#   scale_y_log10() +
+#   facet_wrap(~Site)+
+#   labs(title = "Modeled vs Observed Discharge", y = "Q (m³/day, log scale)", color = "Site") +
+#   theme_bw()
 
 
 ## stats
