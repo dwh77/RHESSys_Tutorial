@@ -290,7 +290,7 @@ driverdf |>
         text = element_text(size = 13))
 
 
-##monthly USGS
+##USGS data
 USGS_daily <- dataRetrieval::readNWISdv(
   siteNumbers = "02055100",
   parameterCd = "00060",          # discharge in cfs
@@ -298,7 +298,8 @@ USGS_daily <- dataRetrieval::readNWISdv(
   endDate   = "2026-04-01"
 ) |>  dataRetrieval::renameNWISColumns()
 
-#plot
+
+#Monthly usgs plots
 USGS_daily |>
   mutate(year = year(Date),
          month_year = floor_date(Date, "month")) |>
@@ -314,6 +315,42 @@ USGS_daily |>
         text = element_text(size = 13))
 
 
+#get percentiles for days based on USGS for forecast eval timeframe
+head(USGS_daily)
+
+USGS_daily |>
+  filter(Date >= ymd("2024-01-01"), Date <= ymd("2026-01-31")) |>
+  ggplot(aes(x = Date, y = Flow))+geom_point()
+
+flow_percentiles <- USGS_daily |>
+  filter(Date >= ymd("2024-01-01"), Date <= ymd("2026-01-31")) |>
+  filter(!is.na(Flow)) |>
+  mutate(flow_percentile = percent_rank(Flow) * 100)
+
+# Step 2: flag top and bottom 10th percentile dates
+# flow_flags <- flow_percentiles |>
+#   mutate(flow_class = case_when(
+#     flow_percentile < 10  ~ "Low flow",
+#     flow_percentile > 90  ~ "High flow",
+#     TRUE                   ~ "Normal"
+#   )) |>
+#   select(Date, Flow, flow_percentile, flow_class)
+
+flow_flags <- flow_percentiles |>
+  mutate(
+    decile     = ntile(Flow, 10),
+    flow_class = case_when(
+      decile == 1  ~ "Low flow",
+      decile == 10 ~ "High flow",
+      TRUE         ~ "Normal"
+    )
+  ) |>
+  select(Date, Flow, flow_percentile, decile, flow_class)
+
+# Step 3: join to your other data frame and filter extreme days
+# other_df_filtered <- other_df |>
+#   left_join(flow_flags, by = "Date") |>
+#   filter(flow_class %in% c("Low flow", "High flow"))
 
 
 
