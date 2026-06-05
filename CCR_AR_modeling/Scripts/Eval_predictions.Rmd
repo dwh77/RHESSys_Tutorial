@@ -559,6 +559,18 @@ ggpubr::annotate_figure(rmse_group_fig,
 
 
 ```{r}
+##fdom stats
+eval2_fdom_stats <- eval2 |> 
+  filter(Date <= ymd("2026-01-31"))
+
+mean(eval2_fdom_stats$fDOM_1m_obs, na.rm = T)
+summary(eval2_fdom_stats$fDOM_1m_obs)
+
+(sd(eval2_fdom_stats$fDOM_1m_obs, na.rm = T) / mean(eval2_fdom_stats$fDOM_1m_obs, na.rm = T))*100
+
+
+
+
 #   model_vars_colors <- c("lake" = "#56B4E9", "catchment" = "#009E73", "lake_catchment" = "#CC79A7", "Persistence" = "black")
 # 
 # c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000")
