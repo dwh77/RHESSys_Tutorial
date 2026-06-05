@@ -107,11 +107,11 @@ rmse_persistence <- metrics_eval_all |>
   select(Horizon, RMSE_persistence = RMSE)
 
 #### RMSE across full time
-rmse_fig3 <- metrics_eval_all |> 
+rmse_fig4 <- metrics_eval_all |> 
   filter(model_class == "Ensemble") |> 
   # filter(model_class %in% c("Ensemble", "Persistence")) |> 
   ggplot(aes(x = Horizon, y = RMSE, col = model_vars)) +
-  geom_line(linewidth = 1) +
+  geom_line(linewidth = 1.5) +
   # facet_wrap(~model_class)+
   scale_color_manual(values = model_vars_colors) +
   ylim(0.5, 3.2)+
@@ -120,17 +120,17 @@ rmse_fig3 <- metrics_eval_all |>
            hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
   annotate("text", x = Inf, y = -Inf, label = "More accurate", 
            hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
-  theme_bw() + theme(legend.position = "top", text = element_text(size = 14))
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 18))
 
-rmse_fig3
+rmse_fig4
 
 #### Skill across full time
-skill_fig3 <- metrics_eval_all |> 
+skill_fig4 <- metrics_eval_all |> 
   filter(model_class == "Ensemble") |> 
   left_join(rmse_persistence, by = "Horizon") |>
   mutate(Skill = 1 - (RMSE / RMSE_persistence)) |> 
   ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
-  geom_line(linewidth = 1) +
+  geom_line(linewidth = 1.5) +
   ylim(-0.05, 0.25)+
   # facet_wrap(~model_class)+
   geom_hline(yintercept = 0, linetype = "dashed", linewidth = 1.5) +
@@ -141,16 +141,28 @@ skill_fig3 <- metrics_eval_all |>
   annotate("text", x = Inf, y = -Inf, label = "Worse than null", 
            hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
   theme_bw() +
-  theme(legend.position = "top", text = element_text(size = 14))
+  theme(legend.position = "top", text = element_text(size = 18))
 
-skill_fig3
+skill_fig4
 
 
-##join figure 3
+##join figure 4
 
-rmse_fig3 | skill_fig3
+rmse_fig4 | skill_fig4
 
 # ggpubr::ggarrange(rmse_fig3, skill_fig3, ncol = 2, labels = "auto")
+
+fig4_fig <- ggpubr::ggarrange(
+  rmse_fig4   + labs(x = NULL),
+  skill_fig4   + labs(x = NULL),
+  ncol = 2, nrow = 1,
+  common.legend = TRUE, legend = "top",
+  labels = c("a", "b")
+)
+
+ggpubr::annotate_figure(fig4_fig,
+  bottom = ggpubr::text_grob("Prediction Horizon (days)", size = 18)
+)
 
 ```
 
@@ -164,7 +176,7 @@ metrics_eval_all |>
   # filter(model_class == "Ensemble") |> 
   # filter(model_class %in% c("Ensemble", "Persistence")) |> 
   ggplot(aes(x = Horizon, y = RMSE, col = model_vars)) +
-  geom_line(linewidth = 1) +
+  geom_line(linewidth = 1.5) +
   facet_wrap(~model_class)+
   scale_color_manual(values = model_vars_colors) +
   # ylim(0.5, 3.2)+
@@ -173,7 +185,7 @@ metrics_eval_all |>
   #          hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
   # annotate("text", x = Inf, y = -Inf, label = "More accurate", 
   #          hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
-  theme_bw() + theme(legend.position = "top", text = element_text(size = 14))
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 18))
 
 
 
@@ -183,7 +195,7 @@ metrics_eval_all |>
   left_join(rmse_persistence, by = "Horizon") |>
   mutate(Skill = 1 - (RMSE / RMSE_persistence)) |> 
   ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
-  geom_line(linewidth = 1) +
+  geom_line(linewidth = 1.5) +
   # ylim(-0.05, 0.25)+
   facet_wrap(~model_class)+
   geom_hline(yintercept = 0, linetype = "dashed", linewidth = 1.5) +
@@ -194,11 +206,33 @@ metrics_eval_all |>
   # annotate("text", x = Inf, y = -Inf, label = "Worse than null", 
   #          hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
   theme_bw() +
-  theme(legend.position = "top", text = element_text(size = 14))
+  theme(legend.position = "top", text = element_text(size = 18))
 
 
 
 ```
+
+
+RMSE, MAE, and R2 for SI
+
+```{r}
+
+metrics_eval_all |> 
+  filter(model_class == "Ensemble") |> 
+  pivot_longer(-c(1:4)) |> 
+  # filter(model_class %in% c("Ensemble", "Persistence")) |> 
+  ggplot(aes(x = Horizon, y = value, col = model_vars)) +
+  geom_line(linewidth = 1.5) +
+  facet_wrap(~name, nrow = 1, scales = "free_y")+
+  scale_color_manual(values = model_vars_colors) +
+  labs(x = "Prediction horizon (days)", y = "value", col = NULL) +
+    theme_bw() + theme(legend.position = "top", text = element_text(size = 18))
+
+
+
+
+```
+
 
 
 
@@ -234,16 +268,16 @@ rmse_persistence_STRAT <- metrics_eval_STRAT |>
 rmse_STRAT <- metrics_eval_STRAT |> 
   filter(model_class %in% c("Ensemble")) |> 
   ggplot(aes(x = Horizon, y = RMSE, col = model_vars)) +
-  geom_line(linewidth = 1) +
+  geom_line(linewidth = 1.5) +
   facet_wrap(~Strat)+
   scale_color_manual(values = model_vars_colors) +
   # ylim(0.5, 3.2)+
   labs(x = "Prediction horizon (days)", y = "RMSE (QSU)", col = NULL) +
-  annotate("text", x = Inf, y = Inf,  label = "Less accurate", 
-           hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
-  annotate("text", x = Inf, y = -Inf, label = "More accurate", 
-           hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
-  theme_bw() + theme(legend.position = "top", text = element_text(size = 14))
+  # annotate("text", x = Inf, y = Inf,  label = "Less accurate", 
+  #          hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
+  # annotate("text", x = Inf, y = -Inf, label = "More accurate", 
+  #          hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 18))
 
 rmse_STRAT
 
@@ -253,18 +287,18 @@ skill_STRAT <- metrics_eval_STRAT |>
   left_join(rmse_persistence_STRAT, by = c("Horizon", "Strat")) |>
   mutate(Skill = 1 - (RMSE / RMSE_persistence)) |> 
   ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
-  geom_line(linewidth = 1) +
+  geom_line(linewidth = 1.5) +
   # ylim(-0.05, 0.25)+
   facet_wrap(~Strat)+
   geom_hline(yintercept = 0, linetype = "dashed", linewidth = 1.5) +
   scale_color_manual(values = model_vars_colors)+
   labs(x = "Prediction Horizon (days)", y = "Skill", color = NULL) +
-  annotate("text", x = Inf, y = Inf,  label = "Better than null", 
-           hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
-  annotate("text", x = Inf, y = -Inf, label = "Worse than null", 
-           hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
+  # annotate("text", x = Inf, y = Inf,  label = "Better than null", 
+  #          hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
+  # annotate("text", x = Inf, y = -Inf, label = "Worse than null", 
+  #          hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
   theme_bw() +
-  theme(legend.position = "top", text = element_text(size = 14))
+  theme(legend.position = "top", text = element_text(size = 18))
 
 skill_STRAT
 
@@ -338,15 +372,15 @@ DryWet2_ens <- DryWet2 |>
   
 flowrmse2 <- DryWet2_ens |>
   ggplot(aes(x = Horizon, y = RMSE, color = model_vars)) +
-  geom_line(linewidth = 1) +
+  geom_line(linewidth = 1.5) +
   facet_wrap(~flow_class) +
   labs(x = "Prediction Horizon (days)", y = "RMSE (QSU)", color = NULL) +
-    annotate("text", x = Inf, y = Inf,  label = "Less accurate", 
-           hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
-  annotate("text", x = Inf, y = -Inf, label = "More accurate", 
-           hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
+  #   annotate("text", x = Inf, y = Inf,  label = "Less accurate", 
+  #          hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
+  # annotate("text", x = Inf, y = -Inf, label = "More accurate", 
+  #          hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
   scale_color_manual(values = model_vars_colors)+
-  theme_bw() +  theme(legend.position = "top", text = element_text(size = 14))
+  theme_bw() +  theme(legend.position = "top", text = element_text(size = 18))
 
 
 flowrmse2
@@ -363,17 +397,17 @@ skill_DryWet2 <- DryWet2_ens |>
 #plot
 flowskill2 <- skill_DryWet2 |>
   ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
-  geom_line(linewidth = 1.2) +
-  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_line(linewidth = 1.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 1.5) +
   facet_wrap(~flow_class) +
   # ylim(-3.5, 1)+
   labs(x = "Prediction Horizon (days)", y = "Skill", color = NULL) +
-    annotate("text", x = Inf, y = Inf,  label = "Better than null", 
-           hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
-  annotate("text", x = Inf, y = -Inf, label = "Worse than null", 
-           hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
+  # annotate("text", x = Inf, y = Inf,  label = "Better than null", 
+  #          hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
+  # annotate("text", x = Inf, y = -Inf, label = "Worse than null", 
+  #          hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
   scale_color_manual(values = model_vars_colors)+
-  theme_bw() +  theme(legend.position = "top", text = element_text(size = 14))
+  theme_bw() +  theme(legend.position = "top", text = element_text(size = 18))
 
 
 flowskill2
@@ -420,15 +454,15 @@ rmse_HighVar <-  Pred_eval_df |>
 
 highvar_rmse <- rmse_HighVar |>
   ggplot(aes(x = Horizon, y = RMSE, color = model_vars)) +
-  geom_line(linewidth = 1) +
+  geom_line(linewidth = 1.5) +
   facet_wrap(~HighVar) +
   labs(x = "Prediction Horizon (days)", y = "RMSE (QSU)", color = NULL) +
-    annotate("text", x = Inf, y = Inf,  label = "Less accurate", 
-           hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
-  annotate("text", x = Inf, y = -Inf, label = "More accurate", 
-           hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
+  # annotate("text", x = Inf, y = Inf,  label = "Less accurate", 
+  #          hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
+  # annotate("text", x = Inf, y = -Inf, label = "More accurate", 
+  #          hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
   scale_color_manual(values = model_vars_colors)+
-  theme_bw() +  theme(legend.position = "top", text = element_text(size = 14))
+  theme_bw() +  theme(legend.position = "top", text = element_text(size = 18))
 
 highvar_rmse
 
@@ -449,16 +483,16 @@ skill_HighVar <- rmse_HighVar |>
 
 highvar_skill <- skill_HighVar |>
   ggplot(aes(x = Horizon, y = Skill, color = model_vars)) +
-  geom_line(linewidth = 1.2) +
-  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_line(linewidth = 1.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 1.5) +
   facet_wrap(~HighVar) +
   labs(x = "Prediction Horizon (days)", y = "Skill", color = NULL) +
-    annotate("text", x = Inf, y = Inf,  label = "Better than null", 
-           hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
-  annotate("text", x = Inf, y = -Inf, label = "Worse than null", 
-           hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
+  # annotate("text", x = Inf, y = Inf,  label = "Better than null", 
+  #          hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic", color = "grey40") +
+  # annotate("text", x = Inf, y = -Inf, label = "Worse than null", 
+  #          hjust = 1.1, vjust = -0.5, size = 4, fontface = "italic", color = "grey40") +
   scale_color_manual(values = model_vars_colors)+
-  theme_bw() +  theme(legend.position = "top", text = element_text(size = 14))
+  theme_bw() +  theme(legend.position = "top", text = element_text(size = 18))
 
 highvar_skill
 
@@ -476,6 +510,25 @@ highvar_rmse / highvar_skill
 
 skill_STRAT / flowskill2 / highvar_skill
 
+# (skill_STRAT / flowskill2 / highvar_skill) +
+#   plot_layout(guides = "collect", axes = "collect") &
+#   theme(legend.position = "top")
+
+
+##arrange nicely w/ one legend, one x-axis, same panel sizes
+skill_group_fig <- ggpubr::ggarrange(
+  skill_STRAT   + labs(x = NULL),
+  flowskill2    + labs(x = NULL),
+  highvar_skill + labs(x = NULL),
+  ncol = 1, nrow = 3,
+  common.legend = TRUE, legend = "top",
+  labels = c("a", "b", "c")
+)
+
+ggpubr::annotate_figure(skill_group_fig,
+  bottom = ggpubr::text_grob("Prediction Horizon (days)", size = 18)
+)
+
 ```
 
 
@@ -485,10 +538,88 @@ skill_STRAT / flowskill2 / highvar_skill
 
 rmse_STRAT / flowrmse2 / highvar_rmse
 
+rmse_group_fig <- ggpubr::ggarrange(
+  rmse_STRAT   + labs(x = NULL),
+  flowrmse2    + labs(x = NULL),
+  highvar_rmse + labs(x = NULL),
+  ncol = 1, nrow = 3,
+  common.legend = TRUE, legend = "top",
+  labels = c("a", "b", "c")
+)
+
+ggpubr::annotate_figure(rmse_group_fig,
+  bottom = ggpubr::text_grob("Prediction Horizon (days)", size = 18)
+)
+
 ```
 
 
-################### OLD ############################################
+
+## Fig 3; fDOM and metric TS
+
+
+```{r}
+#   model_vars_colors <- c("lake" = "#56B4E9", "catchment" = "#009E73", "lake_catchment" = "#CC79A7", "Persistence" = "black")
+# 
+# c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000")
+
+##fDOM TS
+highvar_colors <- c("High_Var" = "red", "Low_Var" = "black")
+
+fdomTS <- eval2 |> 
+  filter(Date <= ymd("2026-01-31")) |> 
+  ggplot(aes(x = Date, y = fDOM_1m_obs))+
+  #ggplot(aes(x = Date, y = fDOM_1m_obs, col = HighVar))+
+  geom_point()+
+  labs(x = "Date", y = "fDOM (QSU)")+
+  #scale_color_manual(values = highvar_colors)+
+  geom_vline(xintercept = ymd("2024-03-01"), linetype = 2, linewidth = 1.2, color = "red")+
+  theme_bw() + theme(legend.position = "none", text = element_text(size = 18))
+
+
+## Flow TS
+Flow_colors <- c("Low flow" = "#D55E00", "High flow" = "#0072B2", "Normal" = "black")
+  
+flowTS <- flow_flags |> 
+  ggplot(aes(x = Date, y = Flow, col = flow_class))+
+  geom_point()+
+   labs(x = "Date", y = "USGS Flow (L/s)")+
+  scale_color_manual(values = Flow_colors)+
+  scale_x_date(date_labels = "%b %y", date_breaks = "6 months")+
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 18))
+
+
+## Density 
+dens_colors <- c("Mixed" = "red", "Strat" = "black")
+
+stratTS <- strat |> 
+  filter(!is.na(Strat)) |> 
+  ggplot(aes(x = Date, y = Diff_Dens_1_max, col = Strat))+
+  geom_point()+
+  labs(x = "Date", y = "Density Difference (kg/m^3)", color = "Stratified")+
+  scale_color_manual(values = dens_colors)+
+  #scale_x_date(date_labels = "%b %Y", date_breaks = "6 months")+
+  theme_bw() + theme(legend.position = "top", text = element_text(size = 18))
+
+
+
+##Join
+
+fdomTS / (flowTS | stratTS) +  
+  plot_annotation(tag_levels = c('a', 'b', 'c') )
+
+
+
+```
+
+
+
+
+
+
+
+
+
 
 
 
@@ -512,7 +643,8 @@ plot_forecast <- function(forecast_date,
                           Pred_eval_df,
                           obs_df,
                           history_days     = 3,
-                          show_horizon_obs = TRUE) {
+                          show_horizon_obs = TRUE,
+                          colors           = NULL) {
 
   ref_date <- as.Date(forecast_date)
 
@@ -549,11 +681,11 @@ plot_forecast <- function(forecast_date,
     # Model forecast lines + points
     geom_line(data  = fc_preds,
               aes(x = fc_date, y = fDOM_1m_predicted, color = model_id),
-              linewidth = 0.9) +
-    geom_point(data = fc_preds,
-               aes(x = fc_date, y = fDOM_1m_predicted, color = model_id),
-               size = 1.8) +
-    labs(title = paste0("30-day forecast issued ", ref_date),
+              linewidth = 1.2) +
+    # geom_point(data = fc_preds,
+    #            aes(x = fc_date, y = fDOM_1m_predicted, color = model_id),
+    #            size = 1.8) +
+    labs(title = paste0("30-day prediction issued ", ref_date),
          x = "Date", y = "fDOM (QSU)", color = NULL) +
     theme_bw() +
     theme(legend.position = "top", text = element_text(size = 13))
@@ -567,6 +699,11 @@ plot_forecast <- function(forecast_date,
                  size = 1.5, stroke = 1.2)
   }
 
+  # Optional: apply a named color scale
+  if (!is.null(colors)) {
+    p <- p + scale_color_manual(values = colors)
+  }
+
   p
 }
 ```
@@ -575,12 +712,17 @@ plot_forecast <- function(forecast_date,
 
 ```{r plot-forecast-example}
 
-models_ensemble_persist <- c("Ensemble_lag_lake", "Ensemble_lag_catchment", 
+models_ensemble_persist <- c("Ensemble_lag_lake", "Ensemble_lag_catchment",
                              "Ensemble_lag_lake_catchment", "Persistence")
 
-models_AR_persist <- c("AR_lag_lake", "AR_lag_catchment", 
-                             "AR_lag_lake_catchment", "Persistence")
+models_AR_persist <- c("AR_lag_lake", "AR_lag_catchment",
+                       "AR_lag_lake_catchment", "Persistence")
 
+# Derive model_id-keyed colors from model_vars_colors for ensemble + Persistence
+ensemble_colors <- c(
+  setNames(model_vars_colors, paste0("Ensemble_lag_", names(model_vars_colors))),
+  "Persistence" = "black"
+)
 
 # All models for a single date
 plot_forecast(
@@ -592,17 +734,29 @@ plot_forecast(
   show_horizon_obs = TRUE
 )
 
-# Subset of models, no horizon observations
-plot_forecast(
+# Ensemble + Persistence with matched colors
+ex1 <- plot_forecast(
+  forecast_date    = "2024-06-01",
+  models           = models_ensemble_persist,
+  Pred_eval_df     = Pred_eval_df,
+  obs_df           = eval,
+  history_days     = 3,
+  show_horizon_obs = TRUE,
+  colors           = ensemble_colors
+)
+
+
+ex2 <- plot_forecast(
   forecast_date    = "2025-02-01",
   models           = models_ensemble_persist,
   Pred_eval_df     = Pred_eval_df,
   obs_df           = eval,
   history_days     = 3,
-  show_horizon_obs = T
+  show_horizon_obs = TRUE,
+  colors           = ensemble_colors
 )
 
-
+ex1 | ex2
 ## Interesting dates: "2025-09-15";
 
 ```
